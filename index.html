@@ -1,0 +1,2962 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>God Sandbox 2D — расширенная песочница</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{background:#05070c;color:#dfe7f5;overflow:hidden;
+    font:13px/1.35 "Segoe UI",Roboto,Arial,sans-serif;user-select:none}
+  #app{display:flex;height:100vh;width:100vw}
+  #stage{flex:1;display:flex;align-items:center;justify-content:center;
+    background:radial-gradient(circle at 50% 15%,#111c30 0%,#05070c 70%);
+    overflow:hidden;position:relative}
+  #stage canvas{max-width:100%;max-height:100%;display:block;border-radius:8px;
+    box-shadow:0 0 80px rgba(60,140,255,.18),0 0 0 1px #1b2740;cursor:crosshair}
+  #panel{width:360px;min-width:360px;height:100vh;display:flex;flex-direction:column;
+    background:linear-gradient(180deg,#0c1220,#080d17);border-left:1px solid #1b2740}
+  #panel header{padding:12px 14px 10px;border-bottom:1px solid #1b2740}
+  #panel h1{font-size:15px;letter-spacing:2px;font-weight:700;
+    background:linear-gradient(90deg,#5ad1ff,#a77bff,#ff7ab6);
+    -webkit-background-clip:text;background-clip:text;color:transparent}
+  .btns{display:flex;gap:8px;margin-top:10px}
+  .btns button{flex:1;padding:8px 6px;border-radius:8px;cursor:pointer;
+    border:1px solid #26385a;background:#121b2e;color:#cfe0ff;
+    font-size:12px;font-weight:600;transition:.15s}
+  .btns button:hover{background:#1b2947;border-color:#3a558a;color:#fff}
+  .btns button.active{background:#7a2020;border-color:#ff6b6b;color:#ffdada}
+  .hint{margin-top:9px;font-size:11px;color:#63799e}
+  #items{flex:1;overflow-y:auto;padding:10px 10px 40px}
+  #items::-webkit-scrollbar{width:8px}
+  #items::-webkit-scrollbar-track{background:#0a1120}
+  #items::-webkit-scrollbar-thumb{background:#233355;border-radius:4px}
+  #items::-webkit-scrollbar-thumb:hover{background:#33507f}
+  section{margin-bottom:14px}
+  section h2{font-size:11px;text-transform:uppercase;letter-spacing:1.2px;
+    color:#6f88b3;margin:0 0 7px 3px;font-weight:700}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+  .item{display:flex;align-items:center;gap:6px;padding:7px 7px;border-radius:8px;
+    cursor:pointer;border:1px solid #1e2c47;background:#101a2c;color:#c3d3ee;
+    font-size:11.5px;text-align:left;transition:.12s;overflow:hidden}
+  .item:hover{background:#17253e;border-color:#34507d;color:#fff;transform:translateY(-1px)}
+  .item.active{background:linear-gradient(180deg,#1d3d6b,#152b4d);
+    border-color:#4aa9ff;color:#fff;box-shadow:0 0 12px rgba(74,169,255,.45) inset}
+  .item .ic{font-size:15px;line-height:1;flex:0 0 auto}
+  .item .nm{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #status{padding:8px 14px;border-top:1px solid #1b2740;
+    font-size:11px;color:#5e769c;display:flex;justify-content:space-between}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage"></div>
+  <aside id="panel">
+    <header>
+      <h1>GOD SANDBOX 2D</h1>
+      <div class="btns">
+        <button id="btnPause">⏸ Пауза</button>
+        <button id="btnClear">🗑 Очистить</button>
+      </div>
+      <div class="hint">ЛКМ — создать · ПКМ — действие · F — удерживать · Q/E — вращать</div>
+    </header>
+    <div id="items"></div>
+    <div id="status"><span id="stTool">Инструмент: —</span><span id="stCount">0 тел</span></div>
+  </aside>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+<script>
+'use strict';
+(function(){
+const { Engine, Runner, Render, Composite, Bodies, Body, Events,
+        Vector, Constraint, Query } = Matter;
+
+const W = 1600, H = 900;
+const engine = Engine.create({ enableSleeping:false });
+engine.gravity.y = 1;
+const world = engine.world;
+
+const render = Render.create({
+  element: document.getElementById('stage'),
+  engine,
+  options:{ width:W, height:H, pixelRatio:1, wireframes:false,
+    background:'#070a11', showAngleIndicator:false, showDebug:false }
+});
+const canvas = render.canvas;
+Render.run(render);
+const runner = Runner.create();
+Runner.run(runner, engine);
+
+let walls = [];
+function buildWalls(){
+  const o = { isStatic:true, friction:0.7, restitution:0, render:{fillStyle:'#111a2c'} };
+  walls = [
+    Bodies.rectangle(W/2, H+30, W*2, 60, o),
+    Bodies.rectangle(-30, H/2, 60, H*3, o),
+    Bodies.rectangle(W+30, H/2, 60, H*3, o),
+    Bodies.rectangle(W/2, -30, W*2, 60, o)
+  ];
+  walls.forEach(w => { w.isWall = true; });
+  Composite.add(world, walls);
+}
+buildWalls();
+
+/* ===== GLOBALS ===== */
+let bodies = [], liquids = [], smoke = [], sparks = [], beams = [];
+let deadCats = [];
+let flash = 0;
+let immortalityActive = false;
+let selected = null, paused = false, bodyCounter = 0;
+
+/* Типы, которые рисуются кастомно (не показывать стандартный прямоугольник) */
+const HIDDEN_TYPES = new Set([
+  'cat','zombieCat',
+  'axe','pickaxe','hammer','shovel','knife','wrench','pruner',
+  'wateringCan','fishingRod','net','umbrella','flashlight','shield','brush','oilCan'
+]);
+
+/* ===== HELPERS ===== */
+function force(b, fx, fy){ Body.applyForce(b, b.position, { x:b.mass*fx*0.001, y:b.mass*fy*0.001 }); }
+const dist = (a,b) => Math.hypot(a.x-b.x, a.y-b.y);
+const rnd  = (a,b) => a + Math.random()*(b-a);
+
+function roundRect(ctx, x, y, w, h, r){
+  ctx.beginPath();
+  ctx.moveTo(x+r, y);
+  ctx.lineTo(x+w-r, y);
+  ctx.quadraticCurveTo(x+w, y, x+w, y+r);
+  ctx.lineTo(x+w, y+h-r);
+  ctx.quadraticCurveTo(x+w, y+h, x+w-r, y+h);
+  ctx.lineTo(x+r, y+h);
+  ctx.quadraticCurveTo(x, y+h, x, y+h-r);
+  ctx.lineTo(x, y+r);
+  ctx.quadraticCurveTo(x, y, x+r, y);
+  ctx.closePath();
+}
+
+function add(b, g){
+  b.g = g || {};
+  if (!b.g.type) b.g.type = 'generic';
+  if (b.temperature === undefined) b.temperature = 20;
+  if (b.isBurning   === undefined) b.isBurning   = false;
+  if (b.isCharged   === undefined) b.isCharged   = false;
+  if (b.chargeTimer === undefined) b.chargeTimer = 0;
+  if (HIDDEN_TYPES.has(b.g.type)) b.render.visible = false;
+  Composite.add(world, b);
+  bodyCounter++;
+  return b;
+}
+function destroyBody(b){
+  if (!b || (b.g && b.g.dead)) return;
+  if (b.g) b.g.dead = true;
+  Composite.remove(world, b);
+}
+function damage(b, amount){
+  if (!b || !b.g || b.g.dead) return;
+  if (b.g.hp === undefined) return;
+  b.g.hp -= amount;
+  if (immortalityActive) b.g.hp = Math.max(1, b.g.hp);
+  if (b.g.hp <= 0){
+    if (b.g.isCreature && b.g.type === 'cat') deadCats.push({x:b.position.x, y:b.position.y, t:6000});
+    destroyBody(b);
+  }
+}
+function nearestOfType(from, types, maxD, filter){
+  let best = null, bd = maxD;
+  for (const o of bodies){
+    if (o === from || !o.g || o.g.dead) continue;
+    if (types.indexOf(o.g.type) === -1) continue;
+    if (filter && !filter(o)) continue;
+    const d = dist(from.position, o.position);
+    if (d < bd){ bd = d; best = o; }
+  }
+  return best;
+}
+function smokePuff(x,y,n,color,spread){
+  spread = spread || 30;
+  for (let i=0;i<n;i++){
+    smoke.push({ x:x+rnd(-spread,spread), y:y+rnd(-spread,spread),
+      vx:rnd(-1.2,1.2), vy:rnd(-1.8,-0.3), r:rnd(5,16),
+      life:rnd(600,1400), maxLife:1400, color: color || 'rgba(120,130,150,1)' });
+  }
+}
+function sparkBurst(x,y,n){
+  for (let i=0;i<n;i++){
+    const a = Math.random()*Math.PI*2, r = rnd(6,26);
+    sparks.push({ x1:x, y1:y, x2:x+Math.cos(a)*r, y2:y+Math.sin(a)*r,
+      life:rnd(80,220), maxLife:220, color: Math.random()<0.5 ? '#7fd6ff' : '#ffe66b' });
+  }
+}
+function explode(pos, radius, power){
+  power = power || 1;
+  for (const b of Composite.allBodies(world)){
+    if (b.isStatic || b.isWall || !b.g) continue;
+    const d = dist(b.position, pos);
+    if (d < radius){
+      const f = 1 - d/radius;
+      let dir = Vector.sub(b.position, pos);
+      if (Vector.magnitude(dir) < 0.001) dir = { x:0, y:-1 };
+      dir = Vector.normalise(dir);
+      Body.applyForce(b, b.position, { x:dir.x*f*power*0.14*b.mass, y:dir.y*f*power*0.14*b.mass });
+      if (b.g.hp !== undefined) damage(b, 140*f*power);
+    }
+  }
+  smokePuff(pos.x, pos.y, 22, 'rgba(90,90,90,1)', radius*0.22);
+  smokePuff(pos.x, pos.y, 10, 'rgba(255,150,50,1)', radius*0.15);
+  sparkBurst(pos.x, pos.y, 14);
+}
+function box(x,y,w,h,color,opts){
+  return Bodies.rectangle(x,y,w,h, Object.assign({
+    density:0.002, friction:0.4, restitution:0.1,
+    render:{ fillStyle: color }
+  }, opts || {}));
+}
+function circ(x,y,r,color,opts){
+  return Bodies.circle(x,y,r, Object.assign({
+    density:0.002, friction:0.3, restitution:0.3,
+    render:{ fillStyle: color }
+  }, opts || {}));
+}
+function dropBody(x,y,r,color,opts){
+  return Bodies.circle(x,y,r, Object.assign({
+    density:0.001, friction:0.005, frictionAir:0.006, restitution:0.15,
+    render:{ fillStyle: color }
+  }, opts || {}));
+}
+/* Кулдаун удара для инструментов */
+function toolCanHit(t){
+  if (t.g.hitCool > 0) return false;
+  t.g.hitCool = 250;
+  return true;
+}
+
+function fireUp(b, k){
+  force(b, 0, -1.6);
+  b.g.life -= 16.6 * k;
+  if (b.g.life <= 0){ destroyBody(b); return; }
+  if (Math.random() < 0.06) smokePuff(b.position.x, b.position.y, 1, 'rgba(80,80,80,1)', 6);
+  b.temperature = 900;
+}
+function ignite(b){
+  if (!b || !b.g || b.g.dead) return;
+  if (b.g.flammable && !b.isBurning){ b.isBurning = true; b.fuel = b.fuel || 100; }
+  if (b.g.type === 'dynamite' || b.g.type === 'powder' || b.g.type === 'barrel' || b.g.type === 'tarBarrel'){
+    b.g.fuse = Math.min(b.g.fuse === undefined ? 200 : b.g.fuse, 200);
+  }
+}
+
+/* ===== REGISTRY ===== */
+const ELEMENTS = {};
+const ORDER = [];
+function def(id, cfg){
+  ELEMENTS[id] = Object.assign({ id, name:id, icon:'▫', cat:'base' }, cfg);
+  ORDER.push(id);
+}
+const CATS = [
+  { id:'base',     name:'Базовые блоки' },
+  { id:'elements', name:'Стихии и жидкости' },
+  { id:'weapons',  name:'Оружие и разрушение' },
+  { id:'mech',     name:'Механизмы и электричество' },
+  { id:'bio',      name:'Биология и коты' },
+  { id:'mystic',   name:'Аномалии и артефакты' },
+  { id:'nature',   name:'Природа и погода' },
+  { id:'tools',    name:'Инструменты и быт' }
+];
+
+/* =========================================================
+   КАТЕГОРИЯ 1 — БАЗОВЫЕ БЛОКИ
+   ========================================================= */
+def('stone', { name:'Камень', icon:'🪨', cat:'base', spawn:(x,y)=>{
+  return add(box(x,y,48,48,'#8d949e',{density:0.008, friction:0.5, restitution:0.02}),
+    { type:'stone', material:'stone', hp:400, maxHp:400 });
+}});
+def('crate', { name:'Ящик', icon:'📦', cat:'base', spawn:(x,y)=>{
+  const b = box(x,y,46,46,'#b07d3a',{density:0.0015, friction:0.45, restitution:0.05});
+  b.fuel = 100;
+  return add(b, { type:'crate', material:'wood', hp:80, maxHp:80, flammable:true,
+    up:(b,k)=>{
+      if (b.position.y < H*0.35) return;
+      for (const w of liquids){
+        if (w.g.type === 'water' && dist(w.position, b.position) < 70){ force(b,0,-2.4); return; }
+      }
+    }});
+}});
+def('metal', { name:'Металл', icon:'🔩', cat:'base', spawn:(x,y)=>{
+  return add(box(x,y,56,22,'#9aa7b8',{density:0.012, friction:0.4, restitution:0.05}),
+    { type:'metal', material:'metal', hp:260, maxHp:260, conductsElectricity:true });
+}});
+def('glass', { name:'Стекло', icon:'🧊', cat:'base', spawn:(x,y)=>{
+  return add(box(x,y,44,44,'rgba(140,220,255,0.72)',{density:0.003, friction:0.15, restitution:0.12}),
+    { type:'glass', material:'glass', hp:26, maxHp:26, brittle:true });
+}});
+def('ice', { name:'Лёд', icon:'❄️', cat:'base', spawn:(x,y)=>{
+  return add(box(x,y,44,44,'#bfefff',{density:0.002, friction:0.01, restitution:0.05}),
+    { type:'ice', material:'ice', hp:70, maxHp:70 });
+}});
+def('sponge', { name:'Губка', icon:'🧽', cat:'base', spawn:(x,y)=>{
+  return add(box(x,y,44,44,'#f3d24a',{density:0.0009, friction:0.7, restitution:0.05}),
+    { type:'sponge', hp:70, maxHp:70, absorbed:0,
+      up:(b,k)=>{
+        for (const w of liquids){
+          if (w.g.dead) continue;
+          if (w.g.type === 'water' && dist(w.position, b.position) < 55){
+            destroyBody(w); b.g.absorbed++; Body.scale(b, 1.08, 1.08);
+          }
+        }
+        if (b.isBurning){ b.isBurning = false;
+          for (let i=0;i<4;i++) smokePuff(b.position.x, b.position.y, 1, 'rgba(180,180,180,1)', 12);
+          if (b.g.absorbed > 0){ b.g.absorbed--; Body.scale(b, 0.94, 0.94); }
+        }
+      }});
+}});
+def('ball', { name:'Мяч', icon:'🔴', cat:'base', spawn:(x,y)=>{
+  return add(circ(x,y,20,'#e5555a',{density:0.0018, friction:0.04, restitution:0.9, frictionAir:0.008}),
+    { type:'ball' });
+}});
+def('barrel', { name:'Порох', icon:'🛢️', cat:'base', spawn:(x,y)=>{
+  return add(box(x,y,38,50,'#6b4b2a',{density:0.002, friction:0.5}),
+    { type:'barrel', hp:40, maxHp:40, flammable:true, fuse:-1,
+      up:(b,k)=>{ if (b.g.fuse > 0){ b.g.fuse -= 16.6*k;
+        if (b.g.fuse <= 0){ explode(b.position, 160, 1.1); destroyBody(b); } } }});
+}});
+def('balloon', { name:'Шарик', icon:'🎈', cat:'base', spawn:(x,y)=>{
+  return add(circ(x,y,22,'#ff7ab6',{density:0.0004, friction:0.02, frictionAir:0.02, restitution:0.6}),
+    { type:'balloon', up:(b,k)=> force(b,0,-2.0) });
+}});
+def('anvil', { name:'Наковальня', icon:'⬛', cat:'base', spawn:(x,y)=>{
+  return add(box(x,y,58,34,'#3d4350',{density:0.05, friction:0.6, restitution:0.02}),
+    { type:'anvil', material:'metal', hp:800, maxHp:800, conductsElectricity:true });
+}});
+
+/* =========================================================
+   КАТЕГОРИЯ 2 — СТИХИИ
+   ========================================================= */
+def('fire', { name:'Огонь', icon:'🔥', cat:'elements', spawn:(x,y)=>{
+  const b = circ(x,y,rnd(5,9),'#ff7a1a',{density:0.0004, frictionAir:0.05, restitution:0.1});
+  b.temperature = 900;
+  return add(b, { type:'fire', life:2600, up:fireUp });
+}});
+def('water', { name:'Вода', icon:'💧', cat:'elements', spawn:(x,y)=>{
+  const out=[];
+  for (let i=0;i<4;i++)
+    out.push(add(dropBody(x+rnd(-16,16),y+rnd(-16,16),7,'#3fa9f5'),
+      { type:'water', liquid:true }));
+  return out;
+}});
+def('lava', { name:'Лава', icon:'🌋', cat:'elements', spawn:(x,y)=>{
+  const out=[];
+  for (let i=0;i<3;i++){
+    const b = dropBody(x+rnd(-14,14),y+rnd(-14,14),8,'#ff5b1a',{density:0.002});
+    b.temperature = 1200;
+    out.push(add(b, { type:'lava', liquid:true }));
+  }
+  return out;
+}});
+def('acid', { name:'Кислота', icon:'🧪', cat:'elements', spawn:(x,y)=>{
+  const out=[];
+  for (let i=0;i<3;i++)
+    out.push(add(dropBody(x+rnd(-14,14),y+rnd(-14,14),6.5,'#7dff5c'),
+      { type:'acid', liquid:true }));
+  return out;
+}});
+def('oil', { name:'Нефть', icon:'🛢', cat:'elements', spawn:(x,y)=>{
+  const out=[];
+  for (let i=0;i<3;i++){
+    const b = dropBody(x+rnd(-14,14),y+rnd(-14,14),7,'#3a2a1a',
+      {density:0.0008, frictionAir:0.03});
+    b.fuel = 200;
+    out.push(add(b, { type:'oil', liquid:true, flammable:true }));
+  }
+  return out;
+}});
+
+/* =========================================================
+   КАТЕГОРИЯ 3 — ОРУЖИЕ
+   ========================================================= */
+def('dynamite', { name:'Динамит', icon:'🧨', cat:'weapons', spawn:(x,y)=>{
+  return add(box(x,y,18,44,'#c0392b',{density:0.002, friction:0.4}),
+    { type:'dynamite', fuse:3000, up:(b,k)=>{
+      b.g.fuse -= 16.6*k;
+      if (b.g.fuse <= 0){ explode(b.position, 170, 1.0); destroyBody(b); }
+    }});
+}});
+def('grenade', { name:'Граната', icon:'💣', cat:'weapons', spawn:(x,y)=>{
+  return add(circ(x,y,14,'#4b6b3a',{density:0.003, friction:0.3, restitution:0.35}),
+    { type:'grenade', fuse:2000, up:(b,k)=>{
+      b.g.fuse -= 16.6*k;
+      if (b.g.fuse <= 0){
+        explode(b.position, 140, 0.9);
+        for (let i=0;i<12;i++){
+          const a = (i/12)*Math.PI*2;
+          const s = circ(b.position.x, b.position.y, 4, '#d9d9d9', {density:0.004, frictionAir:0.01});
+          Body.setVelocity(s, { x:Math.cos(a)*16, y:Math.sin(a)*16 });
+          add(s, { type:'shard', hp:10, maxHp:10,
+            up:(sb,k2)=>{
+              for (const o of bodies){
+                if (o===sb || o.isStatic || !o.g || o.g.dead) continue;
+                if (dist(o.position, sb.position) < 16 && o.g.hp !== undefined) damage(o, 30);
+              }
+            }});
+        }
+        destroyBody(b);
+      }
+    }});
+}});
+def('mine', { name:'Мина', icon:'⚫', cat:'weapons', spawn:(x,y)=>{
+  return add(box(x,y,34,12,'#2f3a2f',{isStatic:true}),
+    { type:'mine', armed:600, up:(b,k)=>{ if (b.g.armed > 0) b.g.armed -= 16.6*k; } });
+}});
+def('saw', { name:'Пила', icon:'⚙️', cat:'weapons', spawn:(x,y)=>{
+  return add(circ(x,y,30,'#c9d1dd',{isStatic:true}),
+    { type:'saw', up:(b,k)=>{
+      b.angle += 0.28*k;
+      for (const o of bodies){
+        if (o===b || o.isStatic || !o.g || o.g.dead) continue;
+        if (dist(o.position, b.position) < 46){
+          if (o.g.hp !== undefined) damage(o, 2.2*k);
+          if (Math.random() < 0.15) sparkBurst(o.position.x, o.position.y, 1);
+        }
+      }
+    }});
+}});
+def('rocket', { name:'Ракета', icon:'🚀', cat:'weapons', spawn:(x,y)=>{
+  const dir = (mouseDir.x === 0 && mouseDir.y === 0) ? {x:1,y:0} : Vector.normalise(mouseDir);
+  const b = box(x,y,16,40,'#e74c3c',{density:0.003, frictionAir:0.01});
+  Body.setAngle(b, Math.atan2(dir.y,dir.x)+Math.PI/2);
+  Body.setVelocity(b, {x:dir.x*8, y:dir.y*8});
+  return add(b, { type:'rocket', dir, up:(b,k)=>{
+    force(b, b.g.dir.x*1.4, b.g.dir.y*1.4);
+    if (Math.random()<0.4) smoke.push({x:b.position.x,y:b.position.y,vx:rnd(-.4,.4),vy:rnd(0,1),
+      r:rnd(3,7),life:400,maxLife:400,color:'rgba(120,120,120,1)'});
+  }});
+}});
+def('flamethrower', { name:'Огнемет', icon:'🚒', cat:'weapons', spawn:(x,y)=>{
+  return add(box(x,y,46,46,'#5a5f6d',{isStatic:true}),
+    { type:'flamethrower', tick:0, up:(b,k)=>{
+      b.g.tick -= k;
+      if (b.g.tick <= 0){
+        b.g.tick = 3;
+        const f = circ(b.position.x+30, b.position.y+rnd(-12,12), rnd(4,7), '#ff8a1a',
+          {density:0.0003, frictionAir:0.04});
+        f.temperature = 900;
+        add(f, { type:'fire', life:900, up:fireUp });
+        Body.setVelocity(f, {x:8, y:rnd(-1,1)});
+      }
+    }});
+}});
+def('blackhole', { name:'Чёрная дыра', icon:'🕳️', cat:'weapons', spawn:(x,y)=>{
+  return add(circ(x,y,26,'rgba(20,10,40,0.95)',{isStatic:true, isSensor:true}),
+    { type:'blackhole', up:(b,k)=>{
+      for (const o of bodies){
+        if (o===b || o.isStatic || !o.g || o.g.dead) continue;
+        const d = dist(o.position, b.position);
+        if (d < 320 && d > 1){
+          const dir = Vector.normalise(Vector.sub(b.position, o.position));
+          const f = (1 - d/320) * 3.2;
+          Body.applyForce(o, o.position, { x:dir.x*f*o.mass*0.001, y:dir.y*f*o.mass*0.001 });
+        }
+        if (d < 24) destroyBody(o);
+      }
+    }});
+}});
+def('nuke', { name:'Ядерка', icon:'☢️', cat:'weapons', spawn:(x,y)=>{
+  return add(box(x,y,50,70,'#c9b400',{density:0.006, friction:0.6}),
+    { type:'nuke', fuse:6000, up:(b,k)=>{
+      b.g.fuse -= 16.6*k;
+      if (b.g.fuse <= 0){
+        const pos = {x:b.position.x, y:b.position.y};
+        for (const o of Composite.allBodies(world)){ if (!o.isWall) destroyBody(o); }
+        flash = 1.4;
+        for (let i=0;i<80;i++){
+          const f = circ(pos.x+rnd(-40,40), pos.y-rnd(0,120), rnd(6,16), '#ff9b2a',
+            {density:0.0002, frictionAir:0.06});
+          Body.setVelocity(f, {x:rnd(-4,4), y:rnd(-9,-2)});
+          add(f, { type:'fire', life:rnd(1200,2600), up:fireUp });
+        }
+        for (let i=0;i<120;i++){
+          smoke.push({x:pos.x+rnd(-180,180), y:pos.y+rnd(-60,60),
+            vx:rnd(-2.5,2.5), vy:rnd(-4.5,-0.6), r:rnd(12,38),
+            life:rnd(1800,3600), maxLife:3600,
+            color: Math.random()<0.5 ? 'rgba(150,150,150,1)' : 'rgba(90,80,70,1)'});
+        }
+      }
+    }});
+}});
+def('freezeRay', { name:'Криолуч', icon:'🔫', cat:'weapons', spawn:(x,y)=>{
+  return add(box(x,y,34,34,'#4fc3f7',{isStatic:true}),
+    { type:'freezeRay', up:(b,k)=>{
+      const x1 = b.position.x+17, y1 = b.position.y;
+      beams.push({x1, y1, x2:x1+420, y2:y1, color:'rgba(120,230,255,0.65)', w:6});
+      for (const o of bodies){
+        if (o===b || o.isStatic || !o.g || o.g.dead) continue;
+        if (o.position.x > x1 && o.position.x < x1+420 && Math.abs(o.position.y-y1) < 26){
+          if (o.g.type === 'water'){
+            destroyBody(o);
+            add(box(o.position.x, o.position.y, 14,14,'#bfefff',{density:0.002, friction:0.02}),
+              { type:'ice', hp:40, maxHp:40 });
+          } else if (o.g.hp !== undefined){
+            o.g.frozen = 60; Body.setVelocity(o, {x:0,y:0}); o.render.fillStyle = '#8fe3ff';
+          }
+        }
+      }
+    }});
+}});
+def('gravityGun', { name:'Грав-пушка', icon:'🌀', cat:'weapons', tool:true });
+def('eraser',    { name:'Ластик',      icon:'🧹', cat:'weapons', tool:true });
+
+/* =========================================================
+   КАТЕГОРИЯ 4 — МЕХАНИЗМЫ
+   ========================================================= */
+def('battery', { name:'Батарейка', icon:'🔋', cat:'mech', spawn:(x,y)=>{
+  const b = box(x,y,26,46,'#2ecc71',{density:0.004});
+  b.isCharged = true; b.chargeTimer = 1e9;
+  return add(b, { type:'battery', conductsElectricity:true,
+    up:(b,k)=>{ b.isCharged = true; b.chargeTimer = 1e9;
+      if (Math.random() < 0.08) sparkBurst(b.position.x, b.position.y, 1); } });
+}});
+def('propeller', { name:'Пропеллер', icon:'🌀', cat:'mech', spawn:(x,y)=>{
+  return add(box(x,y,26,26,'#7f8fa6',{isStatic:true}),
+    { type:'propeller', up:(b,k)=>{
+      b.angle += 0.5*k;
+      const cx = b.position.x, cy = b.position.y;
+      for (const o of bodies){
+        if (o===b || o.isStatic || !o.g || o.g.dead) continue;
+        if (Math.abs(o.position.x-cx) < 150 && o.position.y < cy && o.position.y > cy-340) force(o,0,-0.9);
+      }
+    }});
+}});
+def('spring', { name:'Пружина', icon:'🪀', cat:'mech', spawn:(x,y)=>{
+  return add(box(x,y,44,16,'#ffd166',{isStatic:true}), { type:'spring' });
+}});
+def('button', { name:'Кнопка', icon:'🔘', cat:'mech', spawn:(x,y)=>{
+  return add(box(x,y,46,12,'#e74c3c',{isStatic:true}),
+    { type:'button', cool:0, up:(b,k)=>{ if (b.g.cool>0) b.g.cool -= k; } });
+}});
+def('magnet', { name:'Магнит', icon:'🧲', cat:'mech', spawn:(x,y)=>{
+  return add(circ(x,y,26,'#c0392b',{isStatic:true}),
+    { type:'magnet', up:(b,k)=>{
+      for (const o of bodies){
+        if (o===b || o.isStatic || !o.g || o.g.dead || !o.g.conductsElectricity) continue;
+        const d = dist(o.position, b.position);
+        if (d < 300 && d > 1){
+          const dir = Vector.normalise(Vector.sub(b.position, o.position));
+          const f = (1 - d/300) * 2.0;
+          Body.applyForce(o, o.position, { x:dir.x*f*o.mass*0.001, y:dir.y*f*o.mass*0.001 });
+        }
+      }
+    }});
+}});
+function makeTeleport(x,y,color,kind){
+  return add(circ(x,y,28,color,{isStatic:true, isSensor:true, render:{fillStyle:color, opacity:0.6}}),
+    { type:kind, cool:0, up:(b,k)=>{ if (b.g.cool>0) b.g.cool -= k; } });
+}
+def('tpIn',  { name:'Телепорт◀', icon:'🟣', cat:'mech', spawn:(x,y)=> makeTeleport(x,y,'rgba(170,110,255,0.75)','tpIn') });
+def('tpOut', { name:'Телепорт▶', icon:'🟪', cat:'mech', spawn:(x,y)=> makeTeleport(x,y,'rgba(110,200,255,0.75)','tpOut') });
+def('motor', { name:'Двигатель', icon:'🔧', cat:'mech', spawn:(x,y)=>{
+  return add(circ(x,y,24,'#8e7cc3',{isStatic:true}),
+    { type:'motor', up:(b,k)=>{
+      b.angle += 0.18*k;
+      for (const o of bodies){
+        if (o===b || o.isStatic || !o.g || o.g.dead) continue;
+        if (dist(o.position, b.position) < 55) o.angularVelocity += 0.03*k;
+      }
+    }});
+}});
+def('slowmo', { name:'Замедлитель', icon:'⏳', cat:'mech', spawn:(x,y)=>{
+  return add(circ(x,y,90,'rgba(90,150,255,0.13)',{isStatic:true, isSensor:true}),
+    { type:'slowmo', up:(b,k)=>{
+      for (const o of bodies){
+        if (o===b || o.isStatic || !o.g || o.g.dead) continue;
+        if (dist(o.position, b.position) < 90){
+          Body.setVelocity(o, { x:o.velocity.x*(1-0.10*k), y:o.velocity.y*(1-0.10*k) });
+          o.angularVelocity *= (1-0.10*k);
+        }
+      }
+    }});
+}});
+def('conveyor', { name:'Конвейер', icon:'➡️', cat:'mech', spawn:(x,y)=>{
+  return add(box(x,y,140,20,'#455a64',{isStatic:true}),
+    { type:'conveyor', dir:1, up:(b,k)=>{
+      for (const o of bodies){
+        if (o===b || o.isStatic || !o.g || o.g.dead) continue;
+        if (Math.abs(o.position.x-b.position.x) < 70 &&
+            o.position.y < b.position.y && o.position.y > b.position.y-40)
+          Body.setVelocity(o, { x:3.5*b.g.dir, y:o.velocity.y });
+      }
+    }});
+}});
+def('sparkGen', { name:'Генератор искр', icon:'⚡', cat:'mech', spawn:(x,y)=>{
+  return add(box(x,y,34,34,'#f1c40f',{isStatic:true}),
+    { type:'sparkGen', t:0, up:(b,k)=>{
+      b.g.t -= 16.6*k;
+      if (b.g.t <= 0){
+        b.g.t = 1000;
+        const s = circ(b.position.x, b.position.y-24, 5, '#8fe3ff', {density:0.0005, frictionAir:0.02});
+        const sb = add(s, { type:'spark', life:3000, up:(x2,k2)=>{
+          x2.g.life -= 16.6*k2;
+          if (x2.g.life <= 0) destroyBody(x2);
+          if (Math.random()<0.3) sparkBurst(x2.position.x, x2.position.y, 1);
+        }});
+        sb.isCharged = true; sb.chargeTimer = 1e9;
+        Body.setVelocity(sb, { x:rnd(-3,3), y:rnd(-6,-2) });
+      }
+    }});
+}});
+def('mud', { name:'Липкая грязь', icon:'🟤', cat:'mech', spawn:(x,y)=>{
+  return add(box(x,y,80,20,'#5a4020',{isStatic:true}),
+    { type:'mud', up:(b,k)=>{
+      for (const o of bodies){
+        if (o===b || o.isStatic || !o.g || o.g.dead) continue;
+        if (dist(o.position, b.position) < 60 && o.mass < 2){
+          Body.setVelocity(o, { x:o.velocity.x*0.5, y:Math.max(0,o.velocity.y) });
+        }
+      }
+    }});
+}});
+def('weightPlate', { name:'Плита-весы', icon:'⚖️', cat:'mech', spawn:(x,y)=>{
+  return add(box(x,y,80,14,'#888888',{isStatic:true}),
+    { type:'weightPlate', threshold:5, triggered:false, up:(b,k)=>{
+      let m = 0;
+      for (const o of bodies){
+        if (o===b || o.isStatic || !o.g || o.g.dead) continue;
+        if (dist(o.position, b.position) < 50) m += o.mass;
+      }
+      b.g.triggered = m > b.g.threshold;
+      b.render.fillStyle = b.g.triggered ? '#ff4444' : '#888888';
+      if (b.g.triggered && Math.random()<0.1*k) sparkBurst(b.position.x, b.position.y, 2);
+    }});
+}});
+def('bridge', { name:'Разрушаемый мост', icon:'🌉', cat:'mech', spawn:(x,y)=>{
+  const segs = [], count = 8;
+  const leftAnchor = add(box(x-(count/2)*30, y, 10, 20, '#333333', {isStatic:true}), {type:'bridgeAnchor'});
+  const rightAnchor = add(box(x+(count/2)*30, y, 10, 20, '#333333', {isStatic:true}), {type:'bridgeAnchor'});
+  let prev = leftAnchor;
+  for (let i=0;i<count;i++){
+    const seg = box(x + (i-(count-1)/2)*30, y, 28, 8, '#8b4513', {density:0.001, friction:0.5});
+    add(seg, { type:'bridgeSeg', hp:30, maxHp:30, material:'wood' });
+    Composite.add(world, Constraint.create({
+      bodyA: prev, bodyB: seg, stiffness:0.7, length:2,
+      pointA: { x: (prev===leftAnchor?5:14), y:0 }, pointB: { x:-14, y:0 }
+    }));
+    segs.push(seg); prev = seg;
+  }
+  Composite.add(world, Constraint.create({
+    bodyA: prev, bodyB: rightAnchor, stiffness:0.7, length:2,
+    pointA: { x:14, y:0 }, pointB: { x:-5, y:0 }
+  }));
+  return segs;
+}});
+def('tarBarrel', { name:'Бочка смолы', icon:'🛢️', cat:'mech', spawn:(x,y)=>{
+  const b = box(x,y,40,54,'#1a1a1a',{density:0.002});
+  b.fuel = 200;
+  return add(b, { type:'tarBarrel', hp:50, maxHp:50, fuse:-1,
+    up:(b,k)=>{
+      if (b.g.fuse > 0){
+        b.g.fuse -= 16.6*k;
+        if (b.g.fuse <= 0){
+          for (let i=0;i<8;i++){
+            const d = dropBody(b.position.x+rnd(-30,30), b.position.y+rnd(-20,20), 7, '#1a1a1a',
+              {density:0.003, frictionAir:0.08});
+            d.fuel = 300;
+            add(d, { type:'tar', liquid:true, flammable:true });
+          }
+          destroyBody(b);
+        }
+      }
+    }});
+}});
+def('turret', { name:'Турель', icon:'🔫', cat:'mech', spawn:(x,y)=>{
+  return add(box(x,y,44,30,'#555555',{isStatic:true}),
+    { type:'turret', t:0, up:(b,k)=>{
+      b.g.t -= 16.6*k;
+      if (b.g.t <= 0){
+        b.g.t = 500;
+        const target = nearestOfType(b, ['cat','zombieCat','slime','bat','bee'], 400);
+        if (target){
+          const dir = Vector.normalise(Vector.sub(target.position, b.position));
+          const bullet = circ(b.position.x, b.position.y, 4, '#ffdd00', {density:0.005, frictionAir:0.001});
+          Body.setVelocity(bullet, {x:dir.x*18, y:dir.y*18});
+          add(bullet, { type:'bullet', up:(bb,kk)=>{
+            for (const o of bodies){
+              if (o===bb || o.isStatic || !o.g || o.g.dead) continue;
+              if (dist(o.position, bb.position) < 15){
+                if (o.g.hp !== undefined) damage(o, 15);
+                destroyBody(bb); break;
+              }
+            }
+          }});
+        }
+      }
+    }});
+}});
+def('trap', { name:'Капкан', icon:'🦾', cat:'mech', spawn:(x,y)=>{
+  return add(box(x,y,40,14,'#666666',{isStatic:true}),
+    { type:'trap', caught:null, up:(b,k)=>{
+      if (b.g.caught && b.g.caught.g && !b.g.caught.g.dead){
+        const c = b.g.caught;
+        Body.setPosition(c, { x:b.position.x, y:b.position.y-30 });
+        Body.setVelocity(c, {x:0,y:0});
+      }
+    }, onClick:(b)=>{ b.g.caught = null; b.render.fillStyle = '#666666'; } });
+}});
+def('mirrorShield', { name:'Зеркальный щит', icon:'🛡️', cat:'mech', spawn:(x,y)=>{
+  return add(box(x,y,12,80,'#b0e0e6',{density:0.003}), { type:'mirrorShield', hp:100, maxHp:100 });
+}});
+def('launchPad', { name:'Эжектор', icon:'🚀', cat:'mech', spawn:(x,y)=>{
+  return add(box(x,y,80,16,'#ff8800',{isStatic:true}),
+    { type:'launchPad', t:3000, up:(b,k)=>{
+      b.g.t -= 16.6*k;
+      if (b.g.t <= 0){
+        b.g.t = 3000;
+        for (const o of bodies){
+          if (o===b || o.isStatic || !o.g || o.g.dead) continue;
+          if (Math.abs(o.position.x-b.position.x)<50 && Math.abs(o.position.y-b.position.y)<30)
+            Body.setVelocity(o, {x:o.velocity.x+15, y:o.velocity.y-8});
+        }
+      }
+    }});
+}});
+def('neonSign', { name:'Неоновая вывеска', icon:'💡', cat:'mech', spawn:(x,y)=>{
+  return add(box(x,y,80,30,'#444444',{isStatic:true}),
+    { type:'neonSign', hp:20, maxHp:20, up:(b,k)=>{
+      let powered = false;
+      for (const o of bodies){
+        if (o===b || o.isStatic || !o.g || o.g.dead) continue;
+        if (o.isCharged && dist(o.position, b.position) < 100){ powered = true; break; }
+      }
+      b.render.fillStyle = powered ? '#ff44ff' : '#444444';
+    }});
+}});
+def('seismicCharge', { name:'Сейсмо-заряд', icon:'🌋', cat:'mech', spawn:(x,y)=>{
+  return add(box(x,y,24,50,'#8b4513',{density:0.01}),
+    { type:'seismicCharge', fuse:4000, up:(b,k)=>{
+      b.g.fuse -= 16.6*k;
+      if (b.g.fuse <= 0){
+        for (const o of bodies){
+          if (o===b || o.isStatic || !o.g || o.g.dead) continue;
+          if (dist(o.position, b.position) < 500)
+            Body.applyForce(o, o.position, {x:rnd(-0.3,0.3)*o.mass*0.01, y:-rnd(0.1,0.3)*o.mass*0.01});
+        }
+        smokePuff(b.position.x, b.position.y, 30, 'rgba(120,100,80,1)', 200);
+        destroyBody(b);
+      }
+    }});
+}});
+
+/* =========================================================
+   КАТЕГОРИЯ 5 — БИОЛОГИЯ
+   ========================================================= */
+function makeCat(x,y,zombie){
+  const b = Bodies.rectangle(x,y,44,28,{
+    density:0.0016, friction:0.4, frictionAir:0.02, restitution:0.1,
+    chamfer:{ radius:9 },
+    render:{ visible:false }
+  });
+  return add(b, {
+    type: zombie ? 'zombieCat' : 'cat',
+    hp:100, maxHp:100, isCreature:true,
+    dir: Math.random()<0.5 ? -1 : 1,
+    timer:60, meowTimer:120, panic:0, label:'', labelTimer:0,
+    up: zombie ? zombieCatAI : catAI
+  });
+}
+def('cat',       { name:'Кот',       icon:'🐱', cat:'bio', spawn:(x,y)=> makeCat(x,y,false) });
+def('zombieCat', { name:'Кот-зомби', icon:'🧟', cat:'bio', spawn:(x,y)=> makeCat(x,y,true) });
+
+function catAI(b,k){
+  const g = b.g;
+  if (g.dead) return;
+  if (g.hp <= 0){ destroyBody(b); return; }
+  g.timer -= k; g.meowTimer -= k;
+  if (g.labelTimer > 0) g.labelTimer -= k; else g.label = '';
+  if (g.meowTimer <= 0){
+    g.meowTimer = rnd(180, 420);
+    if (Math.random() < 0.45){ g.label = 'Мяу!'; g.labelTimer = 80; }
+  }
+  if (g.panic > 0) g.panic -= k;
+
+  for (const w of liquids){
+    if (!w.g.dead && w.g.type === 'water' && dist(w.position, b.position) < 50){
+      force(b,0,-2.6); break;
+    }
+  }
+
+  const danger = nearestOfType(b, ['fire','lava'], 230);
+  if (danger){ g.panic = 110; g.dir = (b.position.x < danger.position.x) ? -1 : 1; }
+
+  const toy = nearestOfType(b, ['yarnBall','alarmClock','fishBone'], 350);
+  if (toy && !g.panic && Math.random() < 0.03*k) g.dir = toy.position.x > b.position.x ? 1 : -1;
+
+  const onGround = Math.abs(b.velocity.y) < 0.8;
+  if (g.timer <= 0){
+    g.timer = rnd(30, 80);
+    if (Math.random() < 0.4) g.dir *= -1;
+    if (onGround){
+      const jumpV = (g.panic > 0) ? 5.0 : 3.0;
+      const fwdV  = (g.panic > 0) ? 4.0 : 2.0;
+      Body.setVelocity(b, { x:b.velocity.x + g.dir*fwdV, y:-jumpV });
+    }
+  }
+  const maxV = (g.panic > 0) ? 6 : 3.5;
+  if (onGround && Math.abs(b.velocity.x) < maxV) force(b, g.dir*0.15, 0);
+
+  const ivy = nearestOfType(b, ['ivy','ivySeg'], 40);
+  if (ivy) force(b, 0, -1.2);
+
+  if (b.position.x < 40) g.dir = 1;
+  if (b.position.x > W-40) g.dir = -1;
+
+  if (g.frozen > 0){ g.frozen -= k; Body.setVelocity(b, {x:0,y:0}); }
+  if (g.poison > 0){ g.poison -= k; damage(b, 0.09*k); }
+}
+function zombieCatAI(b,k){
+  const g = b.g;
+  if (g.dead) return;
+  if (g.hp <= 0){ destroyBody(b); return; }
+  const target = nearestOfType(b, ['cat'], 900);
+  if (target){
+    const dir = (target.position.x > b.position.x) ? 1 : -1;
+    if (Math.abs(b.velocity.x) < 4.5) force(b, dir*0.75, 0);
+    if (b.position.y - target.position.y > 40 && Math.abs(b.velocity.y) < 0.5)
+      Body.setVelocity(b, { x:b.velocity.x, y:-6 });
+  } else {
+    if (Math.abs(b.velocity.x) < 1.5) force(b, 0.2, 0);
+  }
+  if (b.position.x < 40) force(b, 1.2, 0);
+  if (b.position.x > W-40) force(b, -1.2, 0);
+}
+
+def('slime', { name:'Слизень', icon:'🟢', cat:'bio', spawn:(x,y)=>{
+  return add(circ(x,y,20,'#5ddc7a',{density:0.0012, friction:0.02, restitution:0.5, frictionAir:0.01}),
+    { type:'slime', hp:50, maxHp:50, timer:60, up:(b,k)=>{
+      b.g.timer -= 16.6*k;
+      if (b.g.timer <= 0){
+        b.g.timer = rnd(1400, 2400);
+        Body.setVelocity(b, { x:rnd(-6,6), y:-8 });
+      }
+    }});
+}});
+def('bat', { name:'Летучая мышь', icon:'🦇', cat:'bio', spawn:(x,y)=>{
+  return add(circ(x,y,14,'#6b4b8a',{density:0.0008, frictionAir:0.02}),
+    { type:'bat', hp:30, maxHp:30, t:0, up:(b,k)=>{
+      force(b, 0, -1.05);
+      b.g.t -= 16.6*k;
+      if (b.g.t <= 0){ b.g.t = rnd(300,800); Body.setVelocity(b, {x:rnd(-5,5), y:rnd(-3,3)}); }
+      if (b.position.y < 60) Body.setVelocity(b, {x:b.velocity.x, y:2});
+    }});
+}});
+def('hive', { name:'Улей', icon:'🐝', cat:'bio', spawn:(x,y)=>{
+  return add(box(x,y,44,54,'#d4a017',{density:0.002, friction:0.5}),
+    { type:'hive', hp:60, maxHp:60 });
+}});
+def('worm', { name:'Червь', icon:'🪱', cat:'bio', spawn:(x,y)=>{
+  return add(circ(x,y,28,'#c97b8a',{density:0.003, friction:0.3, frictionAir:0.02}),
+    { type:'worm', hp:200, maxHp:200, dir:1, up:(b,k)=>{
+      if (Math.abs(b.velocity.x) < 2.5) force(b, b.g.dir*0.5, 0);
+      if (b.position.x < 60) b.g.dir = 1;
+      if (b.position.x > W-60) b.g.dir = -1;
+      for (const o of bodies){
+        if (o===b || o.isStatic || !o.g || o.g.dead) continue;
+        if (dist(o.position, b.position) < 42 &&
+            ['stone','anvil','crate','metal','glass','ice','basalt'].indexOf(o.g.type) >= 0)
+          damage(o, 0.9*k);
+      }
+    }});
+}});
+def('radMushroom', { name:'Радиогриб', icon:'🍄', cat:'bio', spawn:(x,y)=>{
+  return add(circ(x,y,22,'#a6ff4d',{isStatic:true}), { type:'radMushroom' });
+}});
+def('egg', { name:'Яйцо', icon:'🥚', cat:'bio', spawn:(x,y)=>{
+  return add(circ(x,y,17,'#f5e6c8',{density:0.0012, friction:0.3, restitution:0.2}),
+    { type:'egg', hp:12, maxHp:12, timer:5000, up:(b,k)=>{
+      b.g.timer -= 16.6*k;
+      if (b.g.timer <= 0){
+        const p = {x:b.position.x, y:b.position.y};
+        destroyBody(b);
+        if (Math.random() < 0.6) makeCat(p.x, p.y, false);
+        else add(circ(p.x, p.y, 18, '#5ddc7a', {density:0.0012, friction:0.02, restitution:0.5}),
+          { type:'slime', hp:50, maxHp:50, timer:600, up:(sb,kk)=>{
+            sb.g.timer -= 16.6*kk;
+            if (sb.g.timer <= 0){ sb.g.timer = rnd(1400,2400); Body.setVelocity(sb,{x:rnd(-6,6),y:-8}); }
+          }});
+      }
+    }});
+}});
+
+/* =========================================================
+   КАТЕГОРИЯ 6 — АНОМАЛИИ
+   ========================================================= */
+def('gravInv', { name:'Грав-инвертор', icon:'🔃', cat:'mystic', spawn:(x,y)=>{
+  return add(box(x,y,44,44,'#9b59b6',{isStatic:true}),
+    { type:'gravInv', onClick:(b)=>{
+      engine.gravity.y = -engine.gravity.y;
+      sparkBurst(b.position.x, b.position.y, 20);
+    }});
+}});
+def('mirror', { name:'Зеркало', icon:'🪞', cat:'mystic', spawn:(x,y)=>{
+  return add(box(x,y,16,110,'#9fe8ff',{isStatic:true}), { type:'mirror' });
+}});
+def('clock', { name:'Часы бессмертия', icon:'⏰', cat:'mystic', spawn:(x,y)=>{
+  return add(box(x,y,40,40,'#ffd700',{isStatic:true}), { type:'immortality' });
+}});
+def('mutator', { name:'Куб-мутатор', icon:'🎲', cat:'mystic', spawn:(x,y)=>{
+  return add(box(x,y,44,44,'#ff6ec7',{isStatic:true}),
+    { type:'mutator', cool:0, up:(b,k)=>{ if (b.g.cool>0) b.g.cool -= k; } });
+}});
+def('philosopher', { name:'Философский камень', icon:'💎', cat:'mystic', spawn:(x,y)=>{
+  return add(box(x,y,26,26,'#ff4d4d',{density:0.01}), { type:'philosopher' });
+}});
+def('antigrav', { name:'Антиграв-подушка', icon:'🛸', cat:'mystic', spawn:(x,y)=>{
+  return add(box(x,y,180,16,'rgba(120,200,255,0.35)',{isStatic:true, isSensor:true}),
+    { type:'antigrav', up:(b,k)=>{
+      for (const o of bodies){
+        if (o===b || o.isStatic || !o.g || o.g.dead) continue;
+        if (Math.abs(o.position.x-b.position.x) < 100 &&
+            o.position.y < b.position.y && o.position.y > b.position.y-300) force(o,0,-1.15);
+      }
+    }});
+}});
+def('lensUp', { name:'Линза +', icon:'🔍', cat:'mystic', spawn:(x,y)=>{
+  return add(box(x,y,120,20,'rgba(255,220,120,0.25)',{isStatic:true, isSensor:true}), { type:'lensUp' });
+}});
+def('lensDown', { name:'Линза −', icon:'🔎', cat:'mystic', spawn:(x,y)=>{
+  return add(box(x,y,120,20,'rgba(160,120,255,0.25)',{isStatic:true, isSensor:true}), { type:'lensDown' });
+}});
+def('jelly', { name:'Кисель', icon:'🟪', cat:'mystic', spawn:(x,y)=>{
+  return add(box(x,y,140,80,'rgba(150,80,255,0.18)',{isStatic:true, isSensor:true}),
+    { type:'jelly', up:(b,k)=>{
+      for (const o of bodies){
+        if (o===b || o.isStatic || !o.g || o.g.dead) continue;
+        if (Math.abs(o.position.x-b.position.x)<70 && Math.abs(o.position.y-b.position.y)<40)
+          if (o.velocity.y > 1.5) Body.setVelocity(o, {x:o.velocity.x*0.97, y:1.5});
+      }
+    }});
+}});
+def('impulseEraser', { name:'Стиратель импульса', icon:'🧊', cat:'mystic', spawn:(x,y)=>{
+  return add(box(x,y,120,14,'#546e7a',{isStatic:true}), { type:'impulseEraser' });
+}});
+def('duplicator', { name:'Квант-дубликатор', icon:'✨', cat:'mystic', spawn:(x,y)=>{
+  return add(box(x,y,20,140,'rgba(255,120,255,0.3)',{isStatic:true, isSensor:true}),
+    { type:'duplicator' });
+}});
+def('fog', { name:'Туман', icon:'☁️', cat:'mystic', spawn:(x,y)=>{
+  return add(circ(x,y,120,'rgba(200,210,230,0.10)',{isStatic:true, isSensor:true}),
+    { type:'fog', up:(b,k)=>{
+      for (const o of bodies){
+        if (o===b || !o.g || o.g.dead) continue;
+        if (dist(o.position, b.position) < 120) o.g.inFog = true;
+      }
+    }});
+}});
+def('illusion', { name:'Плотная иллюзия', icon:'👻', cat:'mystic', spawn:(x,y)=>{
+  return add(box(x,y,80,80,'rgba(140,255,220,0.30)',{isStatic:true, isSensor:true}),
+    { type:'illusion', solidTimer:0, onClick:(b)=>{
+      b.isSensor = false;
+      b.render.fillStyle = 'rgba(140,255,220,0.85)';
+      b.g.solidTimer = 1000;
+    }, up:(b,k)=>{
+      if (b.g.solidTimer > 0){
+        b.g.solidTimer -= 16.6*k;
+        if (b.g.solidTimer <= 0){ b.isSensor = true; b.render.fillStyle = 'rgba(140,255,220,0.30)'; }
+      }
+    }});
+}});
+def('booster', { name:'Вектор-ускоритель', icon:'➡️', cat:'mystic', spawn:(x,y)=>{
+  return add(box(x,y,70,26,'#ff9f43',{isStatic:true}), { type:'booster', dir:{x:1,y:0} });
+}});
+def('anchor', { name:'Якорь реальности', icon:'⚓', cat:'mystic', spawn:(x,y)=>{
+  return add(circ(x,y,14,'#bdc3c7',{isStatic:true}), { type:'anchor' });
+}});
+
+/* =========================================================
+   КАТЕГОРИЯ 7 — ПРИРОДА И ПОГОДА
+   ========================================================= */
+def('tumbleweed', { name:'Перекати-поле', icon:'🌾', cat:'nature', spawn:(x,y)=>{
+  const b = circ(x,y,20,'#c9a227',{density:0.00025, friction:0, frictionAir:0.01, restitution:0.4});
+  b.fuel = 40;
+  return add(b, { type:'tumbleweed', flammable:true, hp:20, maxHp:20, material:'wood' });
+}});
+def('ivy', { name:'Плющ', icon:'🌿', cat:'nature', spawn:(x,y)=>{
+  const b = box(x,y,18,40,'#2e8b57',{isStatic:true});
+  return add(b, { type:'ivy', segs:[b], timer:2000, up:(b2,k)=>{
+    b2.g.timer -= 16.6*k;
+    if (b2.g.timer <= 0 && b2.g.segs.length < 26){
+      b2.g.timer = 2000;
+      const top = b2.g.segs[b2.g.segs.length-1];
+      const nb = box(top.position.x, top.position.y-38, 18, 38, '#2e8b57', {isStatic:true});
+      add(nb, { type:'ivySeg' });
+      b2.g.segs.push(nb);
+    }
+  }});
+}});
+def('bounceMushroom', { name:'Гриб-батут', icon:'🍄', cat:'nature', spawn:(x,y)=>{
+  return add(circ(x,y,28,'#ff6b81',{isStatic:true}), { type:'bounceMushroom' });
+}});
+
+/* ---- ПОГОДА ---- */
+def('stormCloud', { name:'Грозовая туча', icon:'⛈️', cat:'nature', spawn:(x,y)=>{
+  return add(box(x,y,160,50,'#4a5568',{isStatic:true, isSensor:true}),
+    { type:'stormCloud', t:1000, up:(b,k)=>{
+      b.g.t -= 16.6*k;
+      if (b.g.t <= 0){
+        b.g.t = 1500 + Math.random()*1200;
+        let target = null, bestY = Infinity;
+        for (const o of bodies){
+          if (o===b || o.isStatic || !o.g || o.g.dead) continue;
+          if (o.position.y < b.position.y) continue;
+          if (Math.abs(o.position.x - b.position.x) > 200) continue;
+          const isConduct = o.g.conductsElectricity || o.g.type === 'water';
+          if (isConduct && o.position.y < bestY){ bestY = o.position.y; target = o; }
+        }
+        if (target){
+          const steps = 12;
+          for (let i=0;i<steps;i++){
+            const t1 = i/steps, t2 = (i+1)/steps;
+            sparks.push({
+              x1: b.position.x + (target.position.x - b.position.x)*t1 + rnd(-6,6),
+              y1: b.position.y + (target.position.y - b.position.y)*t1,
+              x2: b.position.x + (target.position.x - b.position.x)*t2 + rnd(-6,6),
+              y2: b.position.y + (target.position.y - b.position.y)*t2,
+              life: 400, maxLife: 400, color: '#aaddff'
+            });
+          }
+          if (target.g.hp !== undefined) damage(target, 35);
+          target.isCharged = true; target.chargeTimer = 2000;
+          sparkBurst(target.position.x, target.position.y, 14);
+          smokePuff(target.position.x, target.position.y, 6, 'rgba(200,200,200,1)', 25);
+        }
+      }
+    }});
+}});
+def('snowCloud', { name:'Снежная туча', icon:'🌨️', cat:'nature', spawn:(x,y)=>{
+  return add(box(x,y,160,50,'#b0c4de',{isStatic:true, isSensor:true}),
+    { type:'snowCloud', t:0, up:(b,k)=>{
+      b.g.t -= 16.6*k;
+      if (b.g.t <= 0){
+        b.g.t = 90;
+        for (let i=0;i<2;i++){
+          const s = circ(b.position.x+rnd(-70,70), b.position.y+25, 3, '#ffffff',
+            {density:0.0001, frictionAir:0.05, restitution:0});
+          add(s, { type:'snow' });
+        }
+      }
+    }});
+}});
+def('acidCloud', { name:'Кислотный дождь', icon:'☠️', cat:'nature', spawn:(x,y)=>{
+  return add(box(x,y,180,50,'rgba(125,255,92,0.4)',{isStatic:true, isSensor:true}),
+    { type:'acidCloud', t:0, up:(b,k)=>{
+      b.g.t -= 16.6*k;
+      if (b.g.t <= 0){
+        b.g.t = 150;
+        const a = dropBody(b.position.x+rnd(-80,80), b.position.y+25, 5, '#7dff5c');
+        add(a, { type:'acid', liquid:true });
+      }
+    }});
+}});
+def('meteor', { name:'Метеорит', icon:'☄️', cat:'nature', spawn:(x,y)=>{
+  const b = circ(x,y,30,'#8b4513',{density:0.02, frictionAir:0.001});
+  Body.setVelocity(b, {x:-3, y:4});
+  return add(b, { type:'meteor', up:(b,k)=>{
+    if (Math.random()<0.8){
+      smoke.push({x:b.position.x, y:b.position.y, vx:rnd(-1,1), vy:rnd(-1,1),
+        r:rnd(4,10), life:500, maxLife:500, color:'rgba(255,100,50,1)'});
+    }
+  }});
+}});
+def('grail', { name:'Святой грааль', icon:'🏆', cat:'nature', spawn:(x,y)=>{
+  return add(box(x,y,30,40,'#ffd700',{isStatic:true}),
+    { type:'grail', up:(b,k)=>{
+      for (let i=deadCats.length-1;i>=0;i--){
+        const dc = deadCats[i];
+        dc.t -= 16.6*k;
+        if (dc.t <= 0){ deadCats.splice(i,1); continue; }
+        if (dist(dc, b.position) < 220){
+          makeCat(dc.x, dc.y, false);
+          deadCats.splice(i,1);
+          sparkBurst(dc.x, dc.y, 8);
+        }
+      }
+      for (const o of bodies){
+        if (o===b || !o.g || o.g.dead) continue;
+        if (o.g.isCreature && o.g.hp !== undefined && dist(o.position, b.position) < 220)
+          o.g.hp = Math.min(o.g.maxHp, o.g.hp + 0.5*k);
+      }
+      if (Math.random()<0.05) sparkBurst(b.position.x, b.position.y, 1);
+    }});
+}});
+def('fertilityTotem', { name:'Тотем плодородия', icon:'🌱', cat:'nature', spawn:(x,y)=>{
+  return add(box(x,y,36,60,'#8b6f3a',{isStatic:true}),
+    { type:'fertilityTotem', up:(b,k)=>{
+      for (const o of bodies){
+        if (o===b || !o.g || o.g.dead) continue;
+        if (o.g.type === 'ivy' && o.g.timer > 0 && Math.random() < 0.05*k)
+          o.g.timer -= 100;
+        if (o.g.type === 'cat' && Math.random() < 0.0005*k){
+          const partner = nearestOfType(o, ['cat'], 100);
+          if (partner && Math.random() < 0.1)
+            makeCat((o.position.x+partner.position.x)/2, (o.position.y+partner.position.y)/2, false);
+        }
+      }
+    }});
+}});
+def('weatherRadar', { name:'Климатический радар', icon:'📡', cat:'nature', spawn:(x,y)=>{
+  return add(circ(x,y,22,'#5a5a5a',{isStatic:true}),
+    { type:'weatherRadar', up:(b,k)=>{
+      b.angle += 0.02*k;
+      for (const o of bodies){
+        if (o===b || !o.g || o.g.dead) continue;
+        if ((o.g.type === 'stormCloud' || o.g.type === 'snowCloud' || o.g.type === 'acidCloud')
+            && Math.random() < 0.02*k) destroyBody(o);
+      }
+    }});
+}});
+def('crystal', { name:'Заражающий кристалл', icon:'💜', cat:'nature', spawn:(x,y)=>{
+  return add(circ(x,y,18,'#a020f0',{isStatic:true}),
+    { type:'crystal', t:0, up:(b,k)=>{
+      b.g.t -= 16.6*k;
+      if (b.g.t <= 0){
+        b.g.t = 500;
+        for (const o of bodies){
+          if (o===b || !o.g || o.g.dead || o.g.type === 'crystalMoss') continue;
+          if (dist(o.position, b.position) < 100 && o.g.hp !== undefined){
+            o.g.type = 'crystalMoss';
+            o.render.fillStyle = 'rgba(200,100,255,0.7)';
+            o.g.hp = Math.min(o.g.hp, 20);
+          }
+        }
+      }
+    }});
+}});
+def('weightlessRune', { name:'Руна невесомости', icon:'ᚱ', cat:'nature', spawn:(x,y)=>{
+  return add(box(x,y,36,36,'#aa88ff',{isStatic:true}),
+    { type:'weightlessRune', up:(b,k)=>{
+      for (const o of bodies){
+        if (o===b || o.isStatic || !o.g) continue;
+        o.frictionAir = 0;
+      }
+    }});
+}});
+def('solarConcentrator', { name:'Солнечный концентратор', icon:'🔆', cat:'nature', spawn:(x,y)=>{
+  return add(box(x,y,60,30,'#ffdd00',{isStatic:true}),
+    { type:'solarConcentrator', up:(b,k)=>{
+      const x = b.position.x;
+      beams.push({x1:x, y1:b.position.y+15, x2:x, y2:H, color:'rgba(255,255,100,0.8)', w:3});
+      for (const o of bodies){
+        if (o===b || o.isStatic || !o.g || o.g.dead) continue;
+        if (Math.abs(o.position.x - x) < 15 && o.position.y > b.position.y){
+          if (o.g.hp !== undefined) damage(o, 0.8*k);
+          if (Math.random() < 0.05) smokePuff(o.position.x, o.position.y, 1, 'rgba(80,80,80,1)', 10);
+        }
+      }
+    }});
+}});
+
+/* =========================================================
+   КАТЕГОРИЯ 8 — ИНСТРУМЕНТЫ
+   ========================================================= */
+def('axe', { name:'Топор', icon:'🪓', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,16,50,'#8B4513',{density:0.004, friction:0.4}),
+    { type:'axe', hp:80, maxHp:80, hitCool:0 });
+}});
+def('pickaxe', { name:'Кирка', icon:'⛏️', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,16,52,'#7a5230',{density:0.005}),
+    { type:'pickaxe', hp:100, maxHp:100, hitCool:0 });
+}});
+def('shovel', { name:'Лопата', icon:'🥄', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,14,52,'#6b4b2a',{density:0.003}),
+    { type:'shovel', hp:60, maxHp:60, hitCool:0 });
+}});
+def('wateringCan', { name:'Лейка', icon:'🚿', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,36,28,'#7f8fa6',{density:0.002}),
+    { type:'wateringCan', t:4000, hitCool:0, up:(b,k)=>{
+      if (b.g.t > 0){
+        b.g.t -= 16.6*k;
+        if (Math.random() < 0.4){
+          add(dropBody(b.position.x+18, b.position.y+10, 5, '#3fa9f5', {frictionAir:0.02}),
+            { type:'water', liquid:true });
+        }
+      }
+    }});
+}});
+def('umbrella', { name:'Зонтик', icon:'☂️', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,44,44,'#c0392b',{density:0.0005, frictionAir:0.15, restitution:0.1}),
+    { type:'umbrella', hitCool:0, up:(b,k)=>{
+      Body.setVelocity(b, {x:b.velocity.x, y:Math.max(-1.5, b.velocity.y*0.9)});
+    }});
+}});
+def('knife', { name:'Охотничий нож', icon:'🔪', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,10,36,'#b0b0b0',{density:0.003}),
+    { type:'knife', hp:40, maxHp:40, hitCool:0 });
+}});
+def('fishingRod', { name:'Удочка', icon:'🎣', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,10,90,'#8B4513',{density:0.003}), { type:'fishingRod', hitCool:0 });
+}});
+def('net', { name:'Сачок', icon:'🪤', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,36,36,'#dddddd',{density:0.0006, frictionAir:0.05}),
+    { type:'net', caught:[], hitCool:0 });
+}});
+def('hammer', { name:'Молоток', icon:'🔨', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,18,44,'#7a5230',{density:0.004}),
+    { type:'hammer', hp:60, maxHp:60, hitCool:0 });
+}});
+def('wrench', { name:'Гаечный ключ', icon:'🔧', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,14,44,'#888888',{density:0.004, conductsElectricity:true}),
+    { type:'wrench', hp:50, maxHp:50, hitCool:0 });
+}});
+
+/* --- Быт / мусор / посуда --- */
+def('bottle', { name:'Стеклянная бутылка', icon:'🍾', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,14,40,'rgba(140,255,140,0.6)',{density:0.002, friction:0.2}),
+    { type:'bottle', hp:8, maxHp:8, contents: Math.random()<0.4 ? 'acid' : 'none' });
+}});
+def('tire', { name:'Автопокрышка', icon:'⭕', cat:'tools', spawn:(x,y)=>{
+  return add(circ(x,y,26,'#1a1a1a',{density:0.002, friction:0.6, restitution:0.7}),
+    { type:'tire', hp:200, maxHp:200, flammable:true, fuel:300 });
+}});
+def('can', { name:'Консервная банка', icon:'🥫', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,20,26,'#a0a0a0',{density:0.003}),
+    { type:'can', hp:40, maxHp:40, conductsElectricity:true });
+}});
+def('plate', { name:'Тарелка', icon:'🍽️', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,44,6,'#f0f0f0',{density:0.002, friction:0.2}),
+    { type:'plate', hp:5, maxHp:5 });
+}});
+def('cardboardBox', { name:'Картонная коробка', icon:'📦', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,44,44,'#c69560',{density:0.0008, friction:0.5}),
+    { type:'cardboardBox', hp:15, maxHp:15, flammable:true, fuel:60, material:'wood' });
+}});
+def('bucket', { name:'Ржавое ведро', icon:'🪣', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,32,32,'#8b6914',{density:0.003}),
+    { type:'bucket', hp:60, maxHp:60, filled:0 });
+}});
+def('tv', { name:'Старый телевизор', icon:'📺', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,56,44,'#222222',{density:0.005}),
+    { type:'tv', hp:40, maxHp:40 });
+}});
+def('pillow', { name:'Подушка', icon:'🛏️', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,56,28,'#f5f0e0',{density:0.0006, friction:0.8, restitution:0}),
+    { type:'pillow', hp:100, maxHp:100, flammable:true, fuel:80 });
+}});
+def('book', { name:'Книга', icon:'📕', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,32,42,'#8b0000',{density:0.0015}),
+    { type:'book', hp:20, maxHp:20, flammable:true, fuel:100 });
+}});
+def('handMirror', { name:'Зеркальце', icon:'🪞', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,20,40,'#c0e6f0',{density:0.002}), { type:'handMirror', hp:10, maxHp:10 });
+}});
+
+/* --- Природные / еда --- */
+def('pebble', { name:'Камушек', icon:'⚪', cat:'tools', spawn:(x,y)=>{
+  return add(circ(x,y,7,'#888888',{density:0.005}), { type:'pebble', hp:20, maxHp:20 });
+}});
+def('stick', { name:'Ветка', icon:'🪵', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,60,8,'#7a5230',{density:0.0015}),
+    { type:'stick', hp:15, maxHp:15, flammable:true, fuel:50, material:'wood' });
+}});
+def('fishBone', { name:'Рыбья кость', icon:'🐟', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,34,8,'#e8e8d0',{density:0.001}), { type:'fishBone' });
+}});
+def('cheese', { name:'Кусок сыра', icon:'🧀', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,26,20,'#ffcc44',{density:0.0015}), { type:'cheese', hp:20, maxHp:20 });
+}});
+def('banana', { name:'Спелый банан', icon:'🍌', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,36,12,'#ffdd44',{density:0.0012}), { type:'banana' });
+}});
+def('coconut', { name:'Кокос', icon:'🥥', cat:'tools', spawn:(x,y)=>{
+  return add(circ(x,y,16,'#6b4b2a',{density:0.006, restitution:0.6}),
+    { type:'coconut', hp:100, maxHp:100 });
+}});
+def('apple', { name:'Яблоко', icon:'🍎', cat:'tools', spawn:(x,y)=>{
+  return add(circ(x,y,14,'#e53935',{density:0.002, restitution:0.3}),
+    { type:'apple', hp:15, maxHp:15 });
+}});
+def('feather', { name:'Птичье перо', icon:'🪶', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,8,22,'#f0f0f0',{density:0.0001, frictionAir:0.25}),
+    { type:'feather' });
+}});
+def('yarnBall', { name:'Шерстяной клубок', icon:'🧶', cat:'tools', spawn:(x,y)=>{
+  return add(circ(x,y,18,'#e91e63',{density:0.0008, restitution:0.5}),
+    { type:'yarnBall', hp:50, maxHp:50 });
+}});
+def('oldBoot', { name:'Старый сапог', icon:'👢', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,26,40,'#3e2723',{density:0.004}), { type:'oldBoot', hp:100, maxHp:100 });
+}});
+
+/* --- Снаряжение --- */
+def('flashlight', { name:'Фонарик', icon:'🔦', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,16,36,'#ffcc00',{density:0.002}), { type:'flashlight', on:true, hitCool:0 });
+}});
+def('shield', { name:'Щит', icon:'🛡️', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,50,60,'#8b6914',{density:0.004}), { type:'shield', hp:120, maxHp:120 });
+}});
+def('brush', { name:'Кисточка', icon:'🖌️', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,8,32,'#c66',{density:0.001}),
+    { type:'brush', brushColor:'#e91e63', hitCool:0 });
+}});
+def('oilCan', { name:'Масленка', icon:'🛢️', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,24,32,'#3a3a3a',{density:0.003}), { type:'oilCan', hitCool:0 });
+}});
+def('pruner', { name:'Секатор', icon:'✂️', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,16,36,'#888888',{density:0.003}), { type:'pruner', hitCool:0 });
+}});
+
+/* --- Одежда --- */
+def('helmet', { name:'Каска', icon:'⛑️', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,34,24,'#ffcc00',{density:0.002}), { type:'helmet', hp:50, maxHp:50 });
+}});
+def('rubberBoots', { name:'Резиновые сапоги', icon:'🥾', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,28,32,'#1b3a1b',{density:0.002, conductsElectricity:false}),
+    { type:'rubberBoots', hp:40, maxHp:40 });
+}});
+def('jetpack', { name:'Реактивный ранец', icon:'🚀', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,32,40,'#5a5a5a',{density:0.004}),
+    { type:'jetpack', hp:80, maxHp:80, t:0, up:(b,k)=>{
+      b.g.t -= 16.6*k;
+      if (b.g.t <= 0){
+        b.g.t = 80;
+        force(b, 0, -3.0);
+        if (Math.random() < 0.7){
+          const f = circ(b.position.x+rnd(-6,6), b.position.y+22, rnd(3,6), '#ff8a1a',
+            {density:0.0002, frictionAir:0.05});
+          f.temperature = 800;
+          add(f, { type:'fire', life:400, up:fireUp });
+        }
+      }
+    }});
+}});
+def('cape', { name:'Плащ-супергероя', icon:'🦸', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,40,54,'#b71c1c',{density:0.0006, frictionAir:0.18}),
+    { type:'cape', up:(b,k)=>{
+      Body.setVelocity(b, {x:b.velocity.x, y:Math.max(-1.2, b.velocity.y*0.85)});
+    }});
+}});
+
+/* --- Кухня --- */
+def('pot', { name:'Кастрюля', icon:'🍲', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,56,44,'#b0b0b0',{density:0.003, conductsElectricity:true}),
+    { type:'pot', hp:150, maxHp:150 });
+}});
+def('rollingPin', { name:'Скалка', icon:'🥖', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,80,16,'#c69560',{density:0.002, friction:0.05, restitution:0.1}),
+    { type:'rollingPin', hp:80, maxHp:80 });
+}});
+def('watermelon', { name:'Арбуз', icon:'🍉', cat:'tools', spawn:(x,y)=>{
+  return add(circ(x,y,26,'#2e8b57',{density:0.003}), { type:'watermelon', hp:50, maxHp:50 });
+}});
+def('donut', { name:'Пончик', icon:'🍩', cat:'tools', spawn:(x,y)=>{
+  return add(circ(x,y,20,'#c68c53',{density:0.0015, restitution:0.3}),
+    { type:'donut', hp:30, maxHp:30, hole:true });
+}});
+def('sodaBottle', { name:'Бутылка газировки', icon:'🥤', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,20,44,'#2e7d32',{density:0.003}),
+    { type:'sodaBottle', hp:12, maxHp:12, pressurized:false });
+}});
+
+/* --- Мелкий быт --- */
+def('shoeBox', { name:'Обувная коробка', icon:'📦', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,60,30,'#a87d4a',{density:0.001}),
+    { type:'shoeBox', hp:20, maxHp:20, flammable:true, material:'wood' });
+}});
+def('toothbrush', { name:'Зубная щетка', icon:'🪥', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,10,40,'#1976d2',{density:0.0008, restitution:0.5}), { type:'toothbrush' });
+}});
+def('brokenGlasses', { name:'Разбитые очки', icon:'👓', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,44,14,'#888888',{density:0.0015}), { type:'brokenGlasses', hp:5, maxHp:5 });
+}});
+def('envelope', { name:'Конверт', icon:'✉️', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,40,26,'#f5f0e0',{density:0.0005, frictionAir:0.12}),
+    { type:'envelope', hp:3, maxHp:3, flammable:true, fuel:20 });
+}});
+def('coin', { name:'Монетка', icon:'🪙', cat:'tools', spawn:(x,y)=>{
+  return add(circ(x,y,10,'#ffd700',{density:0.02, restitution:0.4, conductsElectricity:true}),
+    { type:'coin', hp:100, maxHp:100 });
+}});
+def('alarmClock', { name:'Старый будильник', icon:'⏰', cat:'tools', spawn:(x,y)=>{
+  return add(box(x,y,30,32,'#b0b0b0',{density:0.004}),
+    { type:'alarmClock', hp:30, maxHp:30, ringing:false });
+}});
+
+/* =========================================================
+   ФИЗИЧЕСКИЕ СИСТЕМЫ
+   ========================================================= */
+function gameUpdate(k){
+  beams.length = 0;
+  bodies  = Composite.allBodies(world).filter(b => !b.isWall);
+  liquids = bodies.filter(b => b.g && b.g.liquid);
+  immortalityActive = bodies.some(b => b.g && b.g.type === 'immortality');
+
+  if (draggedBody && (!draggedBody.g || draggedBody.g.dead)) releaseDrag();
+  if (gunTarget && (!gunTarget.g || gunTarget.g.dead)) gunReset();
+
+  for (const b of bodies){ if (b.g) b.g.inFog = false; }
+
+  for (const b of bodies){
+    if (!b.g || b.g.dead) continue;
+    if (b.g.hitCool > 0) b.g.hitCool -= 16.6*k;
+    if (b.g.frozen > 0 && b.g.type !== 'cat' && b.g.type !== 'zombieCat'){
+      b.g.frozen -= 16.6*k;
+      Body.setVelocity(b, {x:0, y:0});
+    }
+    if (b.g.up) b.g.up(b, k);
+  }
+
+  electricitySystem(k);
+  fireSystem(k);
+  particleSystem(k);
+
+  document.getElementById('stCount').textContent = bodies.length + ' тел';
+}
+
+function electricitySystem(k){
+  for (const b of bodies){
+    if (!b.isCharged) continue;
+    if (b.chargeTimer < 1e8){
+      b.chargeTimer -= 16.6*k;
+      if (b.chargeTimer <= 0){ b.isCharged = false; continue; }
+    }
+    if (Math.random() < 0.18) sparkBurst(b.position.x, b.position.y, 1);
+  }
+}
+
+function fireSystem(k){
+  for (const b of bodies){
+    if (!b.isBurning || b.g.dead) continue;
+    b.temperature += 12*k;
+    b.fuel = (b.fuel === undefined ? 100 : b.fuel) - 0.55*k;
+    if (Math.random() < 0.25){
+      smoke.push({x:b.position.x+rnd(-10,10), y:b.position.y+rnd(-10,10),
+        vx:rnd(-0.5,0.5), vy:rnd(-2,-0.6), r:rnd(4,11),
+        life:rnd(600,1300), maxLife:1300,
+        color: b.g.type === 'tar' ? 'rgba(30,30,30,1)' : 'rgba(70,70,70,1)'});
+    }
+    if (b.g.type === 'ice'){
+      damage(b, 0.7*k);
+      if (Math.random() < 0.12){
+        add(dropBody(b.position.x+rnd(-10,10), b.position.y+rnd(-10,10), 6, '#3fa9f5'),
+          { type:'water', liquid:true });
+      }
+    }
+    if (b.fuel <= 0){
+      b.isBurning = false;
+      if (b.g.hp !== undefined && b.g.type !== 'fire') damage(b, 25);
+    }
+  }
+}
+
+function particleSystem(k){
+  for (let i=smoke.length-1;i>=0;i--){
+    const p = smoke[i];
+    p.x += p.vx*k; p.y += p.vy*k;
+    p.vy -= 0.012*k; p.r += 0.08*k; p.life -= 16.6*k;
+    if (p.life <= 0) smoke.splice(i,1);
+  }
+  if (smoke.length > 900) smoke.splice(0, smoke.length-900);
+  for (let i=sparks.length-1;i>=0;i--){
+    sparks[i].life -= 16.6*k;
+    if (sparks[i].life <= 0) sparks.splice(i,1);
+  }
+  if (sparks.length > 600) sparks.splice(0, sparks.length-600);
+  if (flash > 0) flash -= 0.018*k;
+}
+
+/* =========================================================
+   КОЛЛИЗИИ
+   ========================================================= */
+function getType(b){ return (b.g && b.g.type) ? b.g.type : ''; }
+
+function handlePair(a, b){
+  const ta = getType(a), tb = getType(b);
+  if (!ta && !tb) return;
+
+  /* --- Снег --- */
+  if (ta === 'snow' || tb === 'snow'){
+    const snow = ta === 'snow' ? a : b;
+    const other = ta === 'snow' ? b : a;
+    if (other.isStatic || other.mass > 5){
+      other.friction = 0.01;
+      if (Math.random()<0.3) other.render.fillStyle = 'rgba(230,240,255,0.9)';
+    }
+    destroyBody(snow);
+    return;
+  }
+
+  /* --- Огонь --- */
+  if (ta === 'fire' || tb === 'fire'){
+    const fire = ta === 'fire' ? a : b;
+    const other = ta === 'fire' ? b : a;
+    const to = getType(other);
+    if (to === 'water'){ destroyBody(fire); destroyBody(other); return; }
+    if (to === 'snow'){ destroyBody(fire); destroyBody(other); return; }
+    if (other.g && other.g.flammable) ignite(other);
+    if (to === 'ice') damage(other, 1.5);
+    if (to === 'dynamite' || to === 'barrel' || to === 'tarBarrel') ignite(other);
+    if (to === 'bottle' && other.g.contents === 'acid'){ ignite(other); }
+  }
+
+  /* --- Лава --- */
+  if (ta === 'lava' || tb === 'lava'){
+    const lava = ta === 'lava' ? a : b;
+    const other = ta === 'lava' ? b : a;
+    const to = getType(other);
+    if (to === 'water' || to === 'snow'){
+      const p = {x:lava.position.x, y:lava.position.y};
+      destroyBody(lava); destroyBody(other);
+      add(box(p.x, p.y, 26, 26, '#4a4a55', {density:0.006, friction:0.6}),
+        { type:'basalt', material:'stone', hp:300, maxHp:300 });
+      smokePuff(p.x, p.y, 6, 'rgba(160,160,160,1)', 16);
+      return;
+    }
+    if (other.g && other.g.flammable) ignite(other);
+  }
+
+  /* --- Кислота --- */
+  if (ta === 'acid' || tb === 'acid'){
+    const acid = ta === 'acid' ? a : b;
+    const other = ta === 'acid' ? b : a;
+    const to = getType(other);
+    if (['cat','zombieCat','crate','metal','tumbleweed','worm','slime',
+         'cardboardBox','book','envelope','shield'].indexOf(to) >= 0){
+      damage(other, 1.6);
+      if (Math.random() < 0.08){
+        destroyBody(acid);
+        smokePuff(acid.position.x, acid.position.y, 2, 'rgba(120,255,120,1)', 8);
+      }
+    }
+  }
+
+  /* --- Электричество --- */
+  if (a.isCharged && b.g && b.g.conductsElectricity){ b.isCharged = true; b.chargeTimer = 2000; }
+  if (b.isCharged && a.g && a.g.conductsElectricity){ a.isCharged = true; a.chargeTimer = 2000; }
+
+  /* --- Нефть/смола --- */
+  if (ta === 'oil' && (tb === 'fire' || tb === 'lava')){ ignite(a); a.fuel = 400; }
+  if (tb === 'oil' && (ta === 'fire' || ta === 'lava')){ ignite(b); b.fuel = 400; }
+  if (ta === 'tar' && (tb === 'fire' || tb === 'lava')){ ignite(a); a.fuel = 400; }
+  if (tb === 'tar' && (ta === 'fire' || ta === 'lava')){ ignite(b); b.fuel = 400; }
+
+  /* --- Динамит --- */
+  if (ta === 'dynamite' || tb === 'dynamite'){
+    const d = ta === 'dynamite' ? a : b;
+    const o = ta === 'dynamite' ? b : a;
+    if (getType(o) === 'fire' || getType(o) === 'lava') d.g.fuse = Math.min(d.g.fuse, 100);
+  }
+
+  /* --- Ракета / зеркало --- */
+  if (ta === 'rocket' || tb === 'rocket'){
+    const r = ta === 'rocket' ? a : b;
+    const o = ta === 'rocket' ? b : a;
+    if (getType(o) === 'mirror' || getType(o) === 'mirrorShield'){
+      r.g.dir = { x:-r.g.dir.x, y:r.g.dir.y };
+      Body.setVelocity(r, { x:-r.velocity.x*0.9, y:r.velocity.y*0.9 });
+      return;
+    }
+    const p = {x:r.position.x, y:r.position.y};
+    destroyBody(r);
+    explode(p, 130, 0.9);
+    return;
+  }
+
+  /* --- Метеорит --- */
+  if (ta === 'meteor' || tb === 'meteor'){
+    const m = ta === 'meteor' ? a : b;
+    if (!m.g.dead){
+      const p = {x:m.position.x, y:m.position.y};
+      destroyBody(m);
+      explode(p, 220, 1.4);
+      flash = 0.6;
+    }
+    return;
+  }
+
+  /* --- Стекло --- */
+  if (ta === 'glass' || tb === 'glass'){
+    const gl = ta === 'glass' ? a : b;
+    const o = ta === 'glass' ? b : a;
+    const rel = Math.hypot(a.velocity.x-b.velocity.x, a.velocity.y-b.velocity.y);
+    const ot = getType(o);
+    if (rel > 7 || ot === 'anvil' || ot === 'stone' || ot === 'shard' || ot === 'hammer'){
+      const p = {x:gl.position.x, y:gl.position.y};
+      destroyBody(gl);
+      for (let i=0;i<6;i++){
+        const s = circ(p.x+rnd(-14,14), p.y+rnd(-14,14), rnd(3,6), 'rgba(160,230,255,0.85)',
+          {density:0.002, friction:0.3, restitution:0.3});
+        Body.setVelocity(s, {x:rnd(-6,6), y:rnd(-7,1)});
+        add(s, { type:'shard', hp:6, maxHp:6 });
+      }
+    }
+  }
+
+  /* --- Мина --- */
+  if (ta === 'mine' || tb === 'mine'){
+    const m = ta === 'mine' ? a : b;
+    const o = ta === 'mine' ? b : a;
+    if (!o.isStatic && m.g.armed <= 0){
+      const p = {x:m.position.x, y:m.position.y};
+      destroyBody(m);
+      explode(p, 170, 1.1);
+      return;
+    }
+  }
+
+  /* --- Кнопка --- */
+  if (ta === 'button' || tb === 'button'){
+    const btn = ta === 'button' ? a : b;
+    const o = ta === 'button' ? b : a;
+    if (!o.isStatic && o.position.y < btn.position.y && btn.g.cool <= 0){
+      btn.g.cool = 400;
+      for (let i=0;i<10;i++){
+        const f = circ(btn.position.x+rnd(-20,20), btn.position.y-20, rnd(4,7), '#ff8a1a',
+          {density:0.0003, frictionAir:0.05});
+        f.temperature = 900;
+        add(f, { type:'fire', life:800, up:fireUp });
+        Body.setVelocity(f, {x:rnd(-2,2), y:rnd(-9,-4)});
+      }
+      sparkBurst(btn.position.x, btn.position.y, 4);
+    }
+  }
+
+  /* --- Пружина / гриб-батут --- */
+  if (ta === 'spring' || tb === 'spring'){
+    const sp = ta === 'spring' ? a : b;
+    const o = ta === 'spring' ? b : a;
+    if (!o.isStatic && o.position.y < sp.position.y)
+      Body.setVelocity(o, { x:o.velocity.x, y:-16 });
+  }
+  if (ta === 'bounceMushroom' || tb === 'bounceMushroom'){
+    const m = ta === 'bounceMushroom' ? a : b;
+    const o = ta === 'bounceMushroom' ? b : a;
+    if (!o.isStatic && o.position.y < m.position.y)
+      Body.setVelocity(o, { x:o.velocity.x, y:-19 });
+  }
+
+  /* --- Телепорт --- */
+  if (ta === 'tpIn' || tb === 'tpIn'){
+    const tIn = ta === 'tpIn' ? a : b;
+    const o = ta === 'tpIn' ? b : a;
+    if (!o.isStatic && tIn.g.cool <= 0){
+      const outs = bodies.filter(x => x.g && x.g.type === 'tpOut');
+      if (outs.length){
+        const target = outs[Math.floor(Math.random()*outs.length)];
+        Body.setPosition(o, { x:target.position.x, y:target.position.y - 30 });
+        tIn.g.cool = 500; target.g.cool = 500;
+        sparkBurst(o.position.x, o.position.y, 6);
+      }
+    }
+  }
+
+  /* --- Линзы --- */
+  if (ta === 'lensUp' || tb === 'lensUp'){
+    const o = ta === 'lensUp' ? b : a;
+    if (!o.isStatic && !o.g.scaledOnce){
+      o.g.scaledOnce = true;
+      Body.scale(o, 2, 2);
+      o.g.maxHp = (o.g.maxHp || 100) * 2;
+      o.g.hp = (o.g.hp || 100) * 2;
+    }
+  }
+  if (ta === 'lensDown' || tb === 'lensDown'){
+    const o = ta === 'lensDown' ? b : a;
+    if (!o.isStatic && !o.g.scaledOnce){
+      o.g.scaledOnce = true;
+      Body.scale(o, 0.5, 0.5);
+    }
+  }
+
+  /* --- Дубликатор --- */
+  if (ta === 'duplicator' || tb === 'duplicator'){
+    const o = ta === 'duplicator' ? b : a;
+    if (!o.isStatic && !o.g.duplicated && o.g.hp !== undefined){
+      o.g.duplicated = true;
+      const w = o.bounds.max.x - o.bounds.min.x;
+      const h = o.bounds.max.y - o.bounds.min.y;
+      const copy = box(o.position.x + w + 24, o.position.y, w, h, o.render.fillStyle,
+        {density:o.density, friction:o.friction, restitution:o.restitution});
+      Body.setVelocity(copy, o.velocity);
+      add(copy, Object.assign({}, o.g, { duplicated:true }));
+    }
+  }
+
+  /* --- Стиратель импульса --- */
+  if (ta === 'impulseEraser' || tb === 'impulseEraser'){
+    const o = ta === 'impulseEraser' ? b : a;
+    if (!o.isStatic){ Body.setVelocity(o, {x:0, y:0}); Body.setAngularVelocity(o, 0); }
+  }
+
+  /* --- Вектор-ускоритель --- */
+  if (ta === 'booster' || tb === 'booster'){
+    const bs = ta === 'booster' ? a : b;
+    const o = ta === 'booster' ? b : a;
+    if (!o.isStatic){
+      Body.applyForce(o, o.position, { x:bs.g.dir.x*0.06*o.mass, y:bs.g.dir.y*0.06*o.mass });
+      sparkBurst(o.position.x, o.position.y, 2);
+    }
+  }
+
+  /* --- Якорь --- */
+  if (ta === 'anchor' || tb === 'anchor'){
+    const an = ta === 'anchor' ? a : b;
+    const o = ta === 'anchor' ? b : a;
+    if (!o.isStatic && !o.g.anchored){
+      o.g.anchored = true;
+      Composite.add(world, Constraint.create({
+        pointA: { x:an.position.x, y:an.position.y },
+        bodyB: o, stiffness: 0.9, damping: 0.2, length: dist(an.position, o.position)
+      }));
+    }
+  }
+
+  /* --- Радиогриб --- */
+  if (ta === 'radMushroom' || tb === 'radMushroom'){
+    const o = ta === 'radMushroom' ? b : a;
+    if (o.g && o.g.isCreature){ o.g.poison = 1000; }
+  }
+
+  /* --- Зомби --- */
+  if (ta === 'zombieCat' && tb === 'cat') convertCat(b);
+  if (tb === 'zombieCat' && ta === 'cat') convertCat(a);
+
+  /* --- Улей --- */
+  if (ta === 'hive' || tb === 'hive'){
+    const h = ta === 'hive' ? a : b;
+    const o = ta === 'hive' ? b : a;
+    const rel = Math.hypot(a.velocity.x-b.velocity.x, a.velocity.y-b.velocity.y);
+    if (rel > 6 || getType(o) === 'anvil' || getType(o) === 'stone'){
+      const p = {x:h.position.x, y:h.position.y};
+      destroyBody(h);
+      for (let i=0;i<10;i++){
+        const bee = circ(p.x+rnd(-20,20), p.y+rnd(-20,20), 5, '#f1c40f',
+          {density:0.0006, frictionAir:0.02});
+        Body.setVelocity(bee, {x:rnd(-6,6), y:rnd(-8,-2)});
+        add(bee, { type:'bee', life:9000, up:(bb,k2)=>{
+          bb.g.life -= 16.6*k2;
+          if (bb.g.life <= 0){ destroyBody(bb); return; }
+          const target = nearestOfType(bb, ['cat'], 700);
+          if (target){
+            const dir = Vector.normalise(Vector.sub(target.position, bb.position));
+            Body.applyForce(bb, bb.position, { x:dir.x*0.004*bb.mass, y:dir.y*0.004*bb.mass });
+            if (dist(bb.position, target.position) < 24) damage(target, 0.25*k2);
+          }
+          force(bb, 0, -1.0);
+        }});
+      }
+    }
+  }
+
+  /* ============================================
+     ИНСТРУМЕНТЫ — ТОПОР РУБИТ ДЕРЕВО
+     ============================================ */
+  if (ta === 'axe' || tb === 'axe'){
+    const t = ta === 'axe' ? a : b;
+    const o = ta === 'axe' ? b : a;
+    if (Math.hypot(t.velocity.x, t.velocity.y) > 2 && toolCanHit(t)){
+      const ot = getType(o);
+      if (ot === 'crate' || ot === 'stick' || ot === 'tumbleweed' ||
+          ot === 'cardboardBox' || ot === 'shoeBox' || ot === 'bridgeSeg'){
+        damage(o, 60);
+        if (Math.random()<0.4) smokePuff(o.position.x, o.position.y, 1, 'rgba(120,80,50,1)', 10);
+        sparkBurst(o.position.x, o.position.y, 2);
+      }
+    }
+  }
+
+  /* ============================================
+     ИНСТРУМЕНТЫ — КИРКА КРОШИТ КАМЕНЬ
+     ============================================ */
+  if (ta === 'pickaxe' || tb === 'pickaxe'){
+    const t = ta === 'pickaxe' ? a : b;
+    const o = ta === 'pickaxe' ? b : a;
+    if (Math.hypot(t.velocity.x, t.velocity.y) > 2 && toolCanHit(t)){
+      const ot = getType(o);
+      if (ot === 'stone' || ot === 'basalt' || ot === 'anvil' || ot === 'metal'){
+        damage(o, 120);
+        if (Math.random()<0.5) sparkBurst(o.position.x, o.position.y, 3);
+        if (Math.random()<0.3) smokePuff(o.position.x, o.position.y, 2, 'rgba(180,180,180,1)', 12);
+      }
+    }
+  }
+
+  /* --- Молоток: стекло/яйцо --- */
+  if (ta === 'hammer' || tb === 'hammer'){
+    const t = ta === 'hammer' ? a : b;
+    const o = ta === 'hammer' ? b : a;
+    if (Math.hypot(t.velocity.x, t.velocity.y) > 2 && toolCanHit(t)){
+      const ot = getType(o);
+      if (ot === 'glass' || ot === 'egg' || ot === 'plate' || ot === 'bottle' || ot === 'handMirror'){
+        destroyBody(o);
+        if (Math.random()<0.5) sparkBurst(o.position.x, o.position.y, 4);
+      }
+    }
+  }
+
+  /* --- Нож: втыкается в дерево --- */
+  if (ta === 'knife' || tb === 'knife'){
+    const t = ta === 'knife' ? a : b;
+    const o = ta === 'knife' ? b : a;
+    if (Math.hypot(t.velocity.x, t.velocity.y) > 3 && toolCanHit(t) &&
+        (getType(o) === 'crate' || getType(o) === 'stick')){
+      Body.setVelocity(t, {x:0, y:0});
+      Body.setAngularVelocity(t, 0);
+      damage(o, 10);
+    }
+  }
+
+  /* --- Гаечный ключ: клинит механизмы --- */
+  if (ta === 'wrench' || tb === 'wrench'){
+    const t = ta === 'wrench' ? a : b;
+    const o = ta === 'wrench' ? b : a;
+    if (Math.hypot(t.velocity.x, t.velocity.y) > 2 && toolCanHit(t)){
+      const ot = getType(o);
+      if (ot === 'motor' || ot === 'propeller' || ot === 'turret' || ot === 'saw'){
+        o.g.disabled = true;
+        sparkBurst(o.position.x, o.position.y, 5);
+      }
+    }
+  }
+
+  /* --- Лейка: тушит огонь --- */
+  if (ta === 'wateringCan' || tb === 'wateringCan'){
+    const t = ta === 'wateringCan' ? a : b;
+    const o = ta === 'wateringCan' ? b : a;
+    if (getType(o) === 'fire') destroyBody(o);
+  }
+
+  /* --- Секатор: растения --- */
+  if (ta === 'pruner' || tb === 'pruner'){
+    const t = ta === 'pruner' ? a : b;
+    const o = ta === 'pruner' ? b : a;
+    if (Math.hypot(t.velocity.x, t.velocity.y) > 1.5 && toolCanHit(t)){
+      const ot = getType(o);
+      if (ot === 'ivy' || ot === 'ivySeg' || ot === 'bounceMushroom' || ot === 'radMushroom'){
+        destroyBody(o);
+      }
+    }
+  }
+
+  /* --- Кисточка: красит --- */
+  if (ta === 'brush' || tb === 'brush'){
+    const t = ta === 'brush' ? a : b;
+    const o = ta === 'brush' ? b : a;
+    if (Math.hypot(t.velocity.x, t.velocity.y) > 1 && toolCanHit(t) && o.g && o.g.hp !== undefined){
+      const colors = ['#e91e63','#9c27b0','#3f51b5','#00bcd4','#4caf50','#ff9800','#f44336'];
+      const c = colors[Math.floor(Math.random()*colors.length)];
+      o.render.fillStyle = c;
+      if (o.g.type === 'cat' || o.g.type === 'zombieCat') o.g.catColor = c;
+    }
+  }
+
+  /* --- Масленка: смазывает --- */
+  if (ta === 'oilCan' || tb === 'oilCan'){
+    const t = ta === 'oilCan' ? a : b;
+    const o = ta === 'oilCan' ? b : a;
+    if (Math.hypot(t.velocity.x, t.velocity.y) > 2 && toolCanHit(t)){
+      o.friction = 0.01;
+      if (Math.random()<0.3){
+        add(dropBody(o.position.x+rnd(-15,15), o.position.y-10, 5, '#3a2a1a',
+          {density:0.0008}), { type:'oil', liquid:true, flammable:true });
+      }
+    }
+  }
+
+  /* --- Зонтик: коты медленно спускаются --- */
+  if (ta === 'umbrella' || tb === 'umbrella'){
+    const u = ta === 'umbrella' ? a : b;
+    const o = ta === 'umbrella' ? b : a;
+    if (getType(o) === 'cat'){
+      Body.setVelocity(o, { x:o.velocity.x, y:Math.max(-1.5, o.velocity.y*0.8) });
+    }
+  }
+
+  /* --- Плащ: замедляет падение --- */
+  if (ta === 'cape' || tb === 'cape'){
+    const c = ta === 'cape' ? a : b;
+    const o = ta === 'cape' ? b : a;
+    if (getType(o) === 'cat'){
+      Body.setVelocity(o, { x:o.velocity.x, y:Math.max(-1.2, o.velocity.y*0.85) });
+    }
+  }
+
+  /* --- Подушка: гасит удар --- */
+  if (ta === 'pillow' || tb === 'pillow'){
+    const o = ta === 'pillow' ? b : a;
+    if (!o.isStatic && Math.abs(o.velocity.y) > 3){
+      Body.setVelocity(o, { x:o.velocity.x*0.2, y:0 });
+    }
+  }
+
+  /* --- Каска надевается на кота --- */
+  if ((ta === 'helmet' && tb === 'cat') || (tb === 'helmet' && ta === 'cat')){
+    const h = ta === 'helmet' ? a : b;
+    const c = ta === 'helmet' ? b : a;
+    if (!h.g.equipped && !c.g.hasHelmet){
+      c.g.hasHelmet = true;
+      c.g.hp = Math.min(c.g.maxHp, c.g.hp + 30);
+      destroyBody(h);
+      smokePuff(c.position.x, c.position.y, 2, 'rgba(255,200,50,1)', 10);
+    }
+  }
+
+  /* --- Сапоги: иммунитет к току и грязи --- */
+  if ((ta === 'rubberBoots' && tb === 'cat') || (tb === 'rubberBoots' && ta === 'cat')){
+    const b2 = ta === 'rubberBoots' ? a : b;
+    const c = ta === 'rubberBoots' ? b : a;
+    if (!c.g.hasBoots){
+      c.g.hasBoots = true;
+      destroyBody(b2);
+      smokePuff(c.position.x, c.position.y, 2, 'rgba(30,60,30,1)', 10);
+    }
+  }
+
+  /* --- Бутылка: разбивается --- */
+  if (ta === 'bottle' || tb === 'bottle'){
+    const bt = ta === 'bottle' ? a : b;
+    const o = ta === 'bottle' ? b : a;
+    const rel = Math.hypot(a.velocity.x-b.velocity.x, a.velocity.y-b.velocity.y);
+    if (rel > 4){
+      const p = {x:bt.position.x, y:bt.position.y};
+      const contents = bt.g.contents;
+      destroyBody(bt);
+      if (contents === 'acid'){
+        for (let i=0;i<4;i++)
+          add(dropBody(p.x+rnd(-10,10), p.y+rnd(-10,10), 6, '#7dff5c'),
+            { type:'acid', liquid:true });
+      }
+      sparkBurst(p.x, p.y, 6);
+    }
+  }
+
+  /* --- Тарелка: бьётся о ребро --- */
+  if (ta === 'plate' || tb === 'plate'){
+    const pl = ta === 'plate' ? a : b;
+    const o = ta === 'plate' ? b : a;
+    const rel = Math.hypot(a.velocity.x-b.velocity.x, a.velocity.y-b.velocity.y);
+    if (rel > 5 && Math.abs(Math.sin(pl.angle)) > 0.5){
+      const p = {x:pl.position.x, y:pl.position.y};
+      destroyBody(pl);
+      for (let i=0;i<4;i++){
+        const s = circ(p.x+rnd(-14,14), p.y+rnd(-14,14), rnd(2,5), '#e0e0e0',
+          {density:0.0015, friction:0.3, restitution:0.3});
+        Body.setVelocity(s, {x:rnd(-4,4), y:rnd(-4,1)});
+        add(s, { type:'shard', hp:3, maxHp:3 });
+      }
+    }
+  }
+
+  /* --- Картонка: размокает --- */
+  if (ta === 'cardboardBox' || tb === 'cardboardBox'){
+    const c = ta === 'cardboardBox' ? a : b;
+    const o = ta === 'cardboardBox' ? b : a;
+    if (getType(o) === 'water'){ destroyBody(o); damage(c, 5); }
+  }
+
+  /* --- Телевизор: искры --- */
+  if (ta === 'tv' || tb === 'tv'){
+    const t = ta === 'tv' ? a : b;
+    const o = ta === 'tv' ? b : a;
+    const rel = Math.hypot(a.velocity.x-b.velocity.x, a.velocity.y-b.velocity.y);
+    if (rel > 6){
+      const p = {x:t.position.x, y:t.position.y};
+      destroyBody(t);
+      sparkBurst(p.x, p.y, 15);
+      for (const o2 of bodies){
+        if (dist(o2.position, p) < 100 && o2.g && o2.g.type === 'barrel') ignite(o2);
+      }
+    }
+  }
+
+  /* --- Банан: поскользнуться --- */
+  if (ta === 'banana' || tb === 'banana'){
+    const bn = ta === 'banana' ? a : b;
+    const o = ta === 'banana' ? b : a;
+    if (getType(o) === 'cat'){
+      o.g.dir *= -1;
+      Body.setAngularVelocity(o, 0.4);
+      Body.setVelocity(o, { x:o.velocity.x, y:-4 });
+      destroyBody(bn);
+    }
+  }
+
+  /* --- Кокос: оглушает --- */
+  if (ta === 'coconut' || tb === 'coconut'){
+    const c = ta === 'coconut' ? a : b;
+    const o = ta === 'coconut' ? b : a;
+    if (getType(o) === 'cat' && c.velocity.y > 3){
+      o.g.hp = Math.max(1, o.g.hp - 15);
+    }
+  }
+
+  /* --- Яблоко: ест кот --- */
+  if (ta === 'apple' || tb === 'apple'){
+    const ap = ta === 'apple' ? a : b;
+    const o = ta === 'apple' ? b : a;
+    if (getType(o) === 'cat' && o.g.hp < o.g.maxHp){
+      o.g.hp = Math.min(o.g.maxHp, o.g.hp + 20);
+      destroyBody(ap);
+    }
+  }
+
+  /* --- Арбуз: разлетается --- */
+  if (ta === 'watermelon' || tb === 'watermelon'){
+    const w = ta === 'watermelon' ? a : b;
+    const o = ta === 'watermelon' ? b : a;
+    const rel = Math.hypot(a.velocity.x-b.velocity.x, a.velocity.y-b.velocity.y);
+    if (rel > 5 || o.mass > 8){
+      const p = {x:w.position.x, y:w.position.y};
+      destroyBody(w);
+      for (let i=0;i<6;i++){
+        const sl = circ(p.x+rnd(-14,14), p.y+rnd(-14,14), 6, '#ff3344',
+          {density:0.0015, restitution:0.3});
+        Body.setVelocity(sl, {x:rnd(-6,6), y:rnd(-6,1)});
+        add(sl, { type:'slice', hp:5, maxHp:5,
+          up:(s,kk)=>{
+            const c = nearestOfType(s, ['cat'], 30);
+            if (c && c.g.hp < c.g.maxHp){
+              c.g.hp = Math.min(c.g.maxHp, c.g.hp + 15);
+              destroyBody(s);
+            }
+          }});
+      }
+    }
+  }
+
+  /* --- Газировка: летает --- */
+  if (ta === 'sodaBottle' || tb === 'sodaBottle'){
+    const s = ta === 'sodaBottle' ? a : b;
+    const o = ta === 'sodaBottle' ? b : a;
+    const rel = Math.hypot(a.velocity.x-b.velocity.x, a.velocity.y-b.velocity.y);
+    if (rel > 4 && !s.g.pressurized){
+      s.g.pressurized = true;
+      Body.setVelocity(s, { x:rnd(-8,8), y:-12 });
+      for (let i=0;i<10;i++){
+        const p = dropBody(s.position.x, s.position.y, 5, 'rgba(200,255,200,0.9)',
+          {density:0.0005});
+        Body.setVelocity(p, { x:rnd(-4,4), y:rnd(-6,0) });
+        add(p, { type:'foam', life:1500, up:(pp,kk)=>{
+          pp.g.life -= 16.6*kk;
+          if (pp.g.life <= 0) destroyBody(pp);
+        }});
+      }
+    }
+  }
+
+  /* --- Капкан --- */
+  if (ta === 'trap' || tb === 'trap'){
+    const tr = ta === 'trap' ? a : b;
+    const o = ta === 'trap' ? b : a;
+    if (o.g && o.g.isCreature && !tr.g.caught && o.position.y < tr.position.y){
+      tr.g.caught = o;
+      tr.render.fillStyle = '#aa0000';
+      o.g.frozen = 9999;
+    }
+  }
+
+  /* --- Сачок --- */
+  if (ta === 'net' || tb === 'net'){
+    const n = ta === 'net' ? a : b;
+    const o = ta === 'net' ? b : a;
+    if (getType(o) === 'bee' || getType(o) === 'bat'){
+      if (!n.g.caught.includes(o)) n.g.caught.push(o);
+    }
+  }
+
+  /* --- Неоновая вывеска: бьёт током --- */
+  if (ta === 'neonSign' || tb === 'neonSign'){
+    const n = ta === 'neonSign' ? a : b;
+    const o = ta === 'neonSign' ? b : a;
+    if (getType(o) === 'water' && n.g.hp <= 0){
+      destroyBody(n);
+      for (const o2 of liquids){
+        if (o2.g.type === 'water' && dist(o2.position, n.position) < 100)
+          o2.isCharged = true, o2.chargeTimer = 3000;
+      }
+    }
+  }
+
+  /* --- Батарейка: заряжает воду --- */
+  if (ta === 'battery' || tb === 'battery'){
+    const b2 = ta === 'battery' ? a : b;
+    const o = ta === 'battery' ? b : a;
+    if (getType(o) === 'water'){ o.isCharged = true; o.chargeTimer = 3000; }
+  }
+
+  /* --- Яйцо: разбивается --- */
+  if (ta === 'egg' || tb === 'egg'){
+    const e = ta === 'egg' ? a : b;
+    const rel = Math.hypot(a.velocity.x-b.velocity.x, a.velocity.y-b.velocity.y);
+    if (rel > 6){
+      destroyBody(e);
+      smokePuff(e.position.x, e.position.y, 4, 'rgba(250,250,220,1)', 12);
+    }
+  }
+
+  /* --- Плита-весы: активирует механизмы --- */
+  if (ta === 'weightPlate' || tb === 'weightPlate'){
+    const wp = ta === 'weightPlate' ? a : b;
+    if (wp.g.triggered){
+      for (const o of bodies){
+        if (o===wp || !o.g || o.g.dead) continue;
+        if ((o.g.type === 'turret' || o.g.type === 'launchPad' || o.g.type === 'flamethrower')
+            && dist(o.position, wp.position) < 200){
+          if (o.g.type === 'launchPad' && Math.random()<0.1) o.g.t = 0;
+        }
+      }
+    }
+  }
+}
+
+function convertCat(cat){
+  if (!cat || !cat.g || cat.g.type !== 'cat') return;
+  cat.g.type = 'zombieCat';
+  cat.g.up = zombieCatAI;
+  cat.g.hp = 60;
+  cat.g.maxHp = 60;
+  cat.render.fillStyle = '#6fbf5a';
+}
+
+Events.on(engine, 'collisionStart', ev => {
+  for (const p of ev.pairs) handlePair(p.bodyA, p.bodyB);
+});
+
+/* =========================================================
+   ГЛАВНЫЙ ЦИКЛ
+   ========================================================= */
+Events.on(engine, 'beforeUpdate', ev => {
+  const dt = (ev.source.timing.delta) || 16.666;
+  const k = Math.min(2.5, dt / 16.666);
+  gameUpdate(k);
+});
+
+/* =========================================================
+   ОТРИСОВКА
+   ========================================================= */
+Events.on(render, 'beforeRender', () => {
+  for (const b of bodies){
+    if (!b.g) continue;
+    if (b.g.inFog) b.render.opacity = 0.1;
+    else if (b.render.opacity !== 1 && b.render.opacity !== undefined) b.render.opacity = 1;
+  }
+});
+
+/* ============ РИСУНОК КОТА ============ */
+function drawCat(ctx, b){
+  const bounds = b.bounds;
+  const w = bounds.max.x - bounds.min.x;
+  const h = bounds.max.y - bounds.min.y;
+  const hw = w/2, hh = h/2;
+  const isZombie = b.g.type === 'zombieCat';
+
+  let bodyColor = isZombie ? '#6fbf5a' : '#e8a13c';
+  let darkColor = isZombie ? '#3d7a2a' : '#a8712a';
+  if (b.g.poison > 0){ bodyColor = '#7dff5c'; darkColor = '#4ea830'; }
+  if (b.g.frozen > 0){ bodyColor = '#8fe3ff'; darkColor = '#5ca8c8'; }
+  if (b.g.catColor) bodyColor = b.g.catColor;
+
+  const innerEar  = isZombie ? '#a55555' : '#ff9eb3';
+  const eyeColor  = isZombie ? '#ff2020' : '#2a2a2a';
+  const facing = b.velocity.x < -0.3 ? -1 : 1;
+
+  ctx.save();
+  ctx.globalAlpha = b.g.inFog ? 0.1 : 1;
+  ctx.translate(b.position.x, b.position.y);
+  ctx.rotate(b.angle);
+  ctx.scale(facing, 1);
+
+  /* Хвост */
+  const t = (performance.now()*0.004) + b.id;
+  const wag = Math.sin(t) * 0.4;
+  ctx.strokeStyle = bodyColor;
+  ctx.lineWidth = Math.max(3, h*0.14);
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(-hw*0.75, 0);
+  ctx.quadraticCurveTo(-hw*1.1, -hh*0.5 + wag*8, -hw*1.35, -hh*0.8 + wag*14);
+  ctx.stroke();
+
+  /* Тело */
+  roundRect(ctx, -hw, -hh, w, h, Math.min(hw, hh)*0.55);
+  ctx.fillStyle = bodyColor;
+  ctx.fill();
+  ctx.strokeStyle = darkColor;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  /* Уши */
+  ctx.fillStyle = bodyColor;
+  ctx.beginPath();
+  ctx.moveTo(hw*0.30, -hh);
+  ctx.lineTo(hw*0.55, -hh*1.55);
+  ctx.lineTo(hw*0.78, -hh);
+  ctx.closePath();
+  ctx.fill(); ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(hw*0.02, -hh);
+  ctx.lineTo(hw*0.27, -hh*1.42);
+  ctx.lineTo(hw*0.50, -hh);
+  ctx.closePath();
+  ctx.fill(); ctx.stroke();
+
+  /* Внутренняя часть ушей */
+  ctx.fillStyle = innerEar;
+  ctx.beginPath();
+  ctx.moveTo(hw*0.36, -hh);
+  ctx.lineTo(hw*0.55, -hh*1.38);
+  ctx.lineTo(hw*0.72, -hh);
+  ctx.closePath();
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(hw*0.10, -hh);
+  ctx.lineTo(hw*0.27, -hh*1.30);
+  ctx.lineTo(hw*0.44, -hh);
+  ctx.closePath();
+  ctx.fill();
+
+  /* Глаза */
+  ctx.fillStyle = eyeColor;
+  ctx.beginPath(); ctx.arc(hw*0.22, -hh*0.15, h*0.13, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(hw*0.58, -hh*0.15, h*0.13, 0, Math.PI*2); ctx.fill();
+
+  /* Блики */
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath(); ctx.arc(hw*0.25, -hh*0.20, h*0.045, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(hw*0.61, -hh*0.20, h*0.045, 0, Math.PI*2); ctx.fill();
+
+  /* Зрачки у зомби */
+  if (isZombie){
+    ctx.fillStyle = '#000';
+    ctx.beginPath(); ctx.arc(hw*0.22, -hh*0.15, h*0.06, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(hw*0.58, -hh*0.15, h*0.06, 0, Math.PI*2); ctx.fill();
+  }
+
+  /* Нос */
+  ctx.fillStyle = isZombie ? '#661111' : '#ff6b9d';
+  ctx.beginPath();
+  ctx.moveTo(hw*0.32, hh*0.18);
+  ctx.lineTo(hw*0.50, hh*0.18);
+  ctx.lineTo(hw*0.41, hh*0.32);
+  ctx.closePath();
+  ctx.fill();
+
+  /* Усы */
+  ctx.strokeStyle = darkColor;
+  ctx.lineWidth = 1;
+  for (let i=0;i<3;i++){
+    ctx.beginPath();
+    ctx.moveTo(hw*0.48, hh*0.20 + i*2.5);
+    ctx.lineTo(hw*1.15, hh*0.10 + i*4);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(hw*0.48, hh*0.20 - i*2.5);
+    ctx.lineTo(hw*1.15, hh*0.10 - i*4);
+    ctx.stroke();
+  }
+
+  /* Лапки */
+  ctx.fillStyle = darkColor;
+  const pawR = Math.max(3, h*0.16);
+  const ox = [-hw*0.65, -hw*0.20, hw*0.20, hw*0.65];
+  for (let k=0;k<4;k++){
+    ctx.beginPath();
+    ctx.arc(ox[k], hh - pawR*0.3, pawR, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  /* Коготки */
+  ctx.fillStyle = '#f5f0e0';
+  ctx.beginPath(); ctx.arc(hw*0.62, hh - pawR*0.3 + pawR*0.4, pawR*0.35, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(hw*0.22, hh - pawR*0.3 + pawR*0.4, pawR*0.35, 0, Math.PI*2); ctx.fill();
+
+  /* Каска, если надета */
+  if (b.g.hasHelmet){
+    ctx.fillStyle = '#ffcc00';
+    ctx.beginPath();
+    ctx.arc(0, -hh*0.9, hw*0.7, Math.PI, 0);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = '#a08000';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+/* ============ РИСУНОК ИНСТРУМЕНТОВ ============ */
+function drawTool(ctx, b){
+  const type = b.g.type;
+  const bounds = b.bounds;
+  const w = bounds.max.x - bounds.min.x;
+  const h = bounds.max.y - bounds.min.y;
+  const hw = w/2, hh = h/2;
+
+  ctx.save();
+  ctx.globalAlpha = b.g.inFog ? 0.1 : 1;
+  ctx.translate(b.position.x, b.position.y);
+  ctx.rotate(b.angle);
+
+  switch(type){
+    case 'axe': {
+      // Ручка
+      ctx.fillStyle = '#7a4a1a';
+      ctx.fillRect(-2.5, -hh*0.3, 5, hh*1.3);
+      ctx.strokeStyle = '#5a3a0a';
+      ctx.lineWidth = 0.5;
+      ctx.beginPath();
+      ctx.moveTo(-1, -hh*0.3); ctx.lineTo(-1, hh*0.9);
+      ctx.moveTo(1, -hh*0.3);  ctx.lineTo(1, hh*0.9);
+      ctx.stroke();
+      // Лезвие
+      const grad = ctx.createLinearGradient(-hw, -hh, hw, 0);
+      grad.addColorStop(0, '#e0e0e0');
+      grad.addColorStop(0.5, '#a0a0a0');
+      grad.addColorStop(1, '#707070');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.moveTo(-hw*0.8, -hh*0.4);
+      ctx.lineTo(-hw*1.0, -hh*0.9);
+      ctx.quadraticCurveTo(0, -hh*1.15, hw*1.0, -hh*0.9);
+      ctx.lineTo(hw*0.8, -hh*0.4);
+      ctx.quadraticCurveTo(0, -hh*0.6, -hw*0.8, -hh*0.4);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = '#404040';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+      ctx.beginPath();
+      ctx.moveTo(-hw*0.6, -hh*0.85);
+      ctx.quadraticCurveTo(0, -hh*1.02, hw*0.7, -hh*0.85);
+      ctx.stroke();
+      break;
+    }
+    case 'pickaxe': {
+      // Ручка
+      ctx.fillStyle = '#7a4a1a';
+      ctx.fillRect(-2.5, -hh*0.3, 5, hh*1.3);
+      // Изогнутая кирка
+      ctx.strokeStyle = '#888';
+      ctx.lineWidth = 5;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(-hw*1.3, -hh*0.9);
+      ctx.quadraticCurveTo(0, -hh*0.5, hw*1.3, -hh*0.9);
+      ctx.stroke();
+      ctx.strokeStyle = '#bbb';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(-hw*1.3, -hh*0.9);
+      ctx.quadraticCurveTo(0, -hh*0.55, hw*1.3, -hh*0.9);
+      ctx.stroke();
+      // Острые наконечники
+      ctx.fillStyle = '#aaa';
+      ctx.beginPath(); ctx.arc(-hw*1.3, -hh*0.9, 3, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(hw*1.3, -hh*0.9, 3, 0, Math.PI*2); ctx.fill();
+      break;
+    }
+    case 'hammer': {
+      ctx.fillStyle = '#7a4a1a';
+      ctx.fillRect(-2.5, -hh*0.3, 5, hh*1.3);
+      const grad = ctx.createLinearGradient(-hw, -hh, hw, 0);
+      grad.addColorStop(0, '#888');
+      grad.addColorStop(0.5, '#ccc');
+      grad.addColorStop(1, '#666');
+      ctx.fillStyle = grad;
+      ctx.fillRect(-hw, -hh*0.85, w, hh*0.6);
+      ctx.strokeStyle = '#333';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(-hw, -hh*0.85, w, hh*0.6);
+      // Загнутый конец
+      ctx.fillStyle = '#888';
+      ctx.beginPath();
+      ctx.moveTo(-hw, -hh*0.85);
+      ctx.lineTo(-hw*1.2, -hh*0.6);
+      ctx.lineTo(-hw, -hh*0.5);
+      ctx.closePath();
+      ctx.fill();
+      break;
+    }
+    case 'shovel': {
+      ctx.fillStyle = '#7a4a1a';
+      ctx.fillRect(-2.5, -hh*0.4, 5, hh*1.4);
+      const grad = ctx.createLinearGradient(-hw, hh*0.5, hw, hh);
+      grad.addColorStop(0, '#888');
+      grad.addColorStop(1, '#555');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.moveTo(-hw*0.7, hh*0.3);
+      ctx.lineTo(hw*0.7, hh*0.3);
+      ctx.lineTo(hw*0.5, hh*1.1);
+      ctx.lineTo(-hw*0.5, hh*1.1);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = '#333';
+      ctx.stroke();
+      break;
+    }
+    case 'knife': {
+      ctx.fillStyle = '#2a1a0a';
+      ctx.fillRect(-3, -hh*0.2, 6, hh*0.7);
+      const grad = ctx.createLinearGradient(-hw, -hh, hw, hh);
+      grad.addColorStop(0, '#fff');
+      grad.addColorStop(0.5, '#bbb');
+      grad.addColorStop(1, '#777');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.moveTo(-3, -hh*0.2);
+      ctx.lineTo(3, -hh*0.2);
+      ctx.lineTo(hw*0.5, -hh*0.95);
+      ctx.lineTo(-hw*0.5, -hh*0.95);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = '#444';
+      ctx.stroke();
+      break;
+    }
+    case 'wrench': {
+      ctx.fillStyle = '#999';
+      ctx.fillRect(-3, -hh*0.5, 6, hh*1.2);
+      ctx.strokeStyle = '#aaa';
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.arc(0, -hh*0.6, hw*0.7, Math.PI*0.15, Math.PI*0.85, true);
+      ctx.stroke();
+      ctx.fillStyle = '#070a11';
+      ctx.beginPath();
+      ctx.arc(0, -hh*0.6, hw*0.3, 0, Math.PI*2);
+      ctx.fill();
+      ctx.strokeStyle = '#666';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      for (let i=0;i<6;i++){
+        const a = i * Math.PI/3;
+        const x = Math.cos(a)*hw*0.55;
+        const y = -hh*0.6 + Math.sin(a)*hw*0.55;
+        if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+      }
+      ctx.closePath();
+      ctx.stroke();
+      break;
+    }
+    case 'pruner': {
+      ctx.strokeStyle = '#bbb';
+      ctx.lineWidth = 4;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(-hw*0.6, hh*0.8);
+      ctx.lineTo(hw*0.6, -hh*0.8);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(hw*0.6, hh*0.8);
+      ctx.lineTo(-hw*0.6, -hh*0.8);
+      ctx.stroke();
+      ctx.fillStyle = '#666';
+      ctx.beginPath(); ctx.arc(0, 0, 3, 0, Math.PI*2); ctx.fill();
+      ctx.strokeStyle = '#8B4513';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(-hw*0.6, hh*0.8); ctx.lineTo(-hw*0.8, hh*1.1);
+      ctx.moveTo(hw*0.6, hh*0.8);  ctx.lineTo(hw*0.8, hh*1.1);
+      ctx.stroke();
+      break;
+    }
+    case 'wateringCan': {
+      const grad = ctx.createLinearGradient(-hw, -hh, hw, hh);
+      grad.addColorStop(0, '#888');
+      grad.addColorStop(0.5, '#ccc');
+      grad.addColorStop(1, '#666');
+      ctx.fillStyle = grad;
+      roundRect(ctx, -hw*0.7, -hh*0.6, hw*1.2, hh*1.3, 3);
+      ctx.fill();
+      ctx.strokeStyle = '#333';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.strokeStyle = '#aaa';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.moveTo(hw*0.5, -hh*0.2);
+      ctx.lineTo(hw*1.4, -hh*0.8);
+      ctx.stroke();
+      ctx.fillStyle = '#bbb';
+      ctx.beginPath(); ctx.arc(hw*1.4, -hh*0.8, 4, 0, Math.PI*2); ctx.fill();
+      ctx.strokeStyle = '#666';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(0, -hh*0.6, hw*0.35, Math.PI, 0);
+      ctx.stroke();
+      break;
+    }
+    case 'fishingRod': {
+      ctx.strokeStyle = '#8B4513';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.moveTo(0, hh);
+      ctx.lineTo(0, -hh);
+      ctx.stroke();
+      ctx.strokeStyle = '#2a1a0a';
+      ctx.lineWidth = 3.5;
+      ctx.beginPath();
+      ctx.moveTo(0, hh);
+      ctx.lineTo(0, hh*0.6);
+      ctx.stroke();
+      const t = performance.now()*0.001;
+      const wobble = Math.sin(t)*4;
+      ctx.strokeStyle = 'rgba(200,200,200,0.8)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, -hh);
+      ctx.quadraticCurveTo(hw*2 + wobble, -hh + 30, hw*2 + wobble, -hh + 80);
+      ctx.stroke();
+      ctx.strokeStyle = '#ccc';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(hw*2 + wobble, -hh + 84, 4, -Math.PI*0.5, Math.PI*0.8);
+      ctx.stroke();
+      break;
+    }
+    case 'net': {
+      ctx.strokeStyle = '#8B4513';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(-hw, hh);
+      ctx.lineTo(-hw*0.5, -hh*0.5);
+      ctx.stroke();
+      ctx.strokeStyle = '#aaa';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(0, -hh*0.3, hw*0.8, 0, Math.PI*2);
+      ctx.stroke();
+      ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+      ctx.lineWidth = 0.8;
+      for (let i=-3;i<=3;i++){
+        ctx.beginPath();
+        ctx.moveTo(i*hw*0.22, -hh*0.3 - hw*0.8);
+        ctx.lineTo(i*hw*0.22, -hh*0.3 + hw*0.8);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(-hw*0.8, -hh*0.3 + i*hw*0.22);
+        ctx.lineTo(hw*0.8, -hh*0.3 + i*hw*0.22);
+        ctx.stroke();
+      }
+      break;
+    }
+    case 'umbrella': {
+      const grad = ctx.createLinearGradient(0, -hh, 0, hh*0.2);
+      grad.addColorStop(0, '#e74c3c');
+      grad.addColorStop(1, '#a02020');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(0, -hh*0.3, hw*0.95, Math.PI, 0);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = '#7a1010';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+      for (let i=1;i<4;i++){
+        const a = Math.PI + i*Math.PI/4;
+        ctx.beginPath();
+        ctx.moveTo(0, -hh*0.3);
+        ctx.lineTo(Math.cos(a)*hw*0.95, -hh*0.3 + Math.sin(a)*hw*0.95);
+        ctx.stroke();
+      }
+      ctx.strokeStyle = '#5a3a1a';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.moveTo(0, -hh*0.3);
+      ctx.lineTo(0, hh*0.9);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(-3, hh*0.9, 3, 0, Math.PI, false);
+      ctx.stroke();
+      break;
+    }
+    case 'flashlight': {
+      const grad = ctx.createLinearGradient(-hw, 0, hw, 0);
+      grad.addColorStop(0, '#666');
+      grad.addColorStop(0.5, '#aaa');
+      grad.addColorStop(1, '#555');
+      ctx.fillStyle = grad;
+      roundRect(ctx, -hw*0.7, -hh*0.5, hw*1.4, hh*1.5, 3);
+      ctx.fill();
+      ctx.fillStyle = '#ffe666';
+      ctx.beginPath();
+      ctx.ellipse(0, -hh*0.5, hw*0.8, 4, 0, 0, Math.PI*2);
+      ctx.fill();
+      if (b.g.on){
+        const grad2 = ctx.createRadialGradient(0, -hh*0.5, 5, 0, -hh*0.5, 80);
+        grad2.addColorStop(0, 'rgba(255,255,150,0.7)');
+        grad2.addColorStop(1, 'rgba(255,255,150,0)');
+        ctx.fillStyle = grad2;
+        ctx.beginPath();
+        ctx.moveTo(-hw*0.8, -hh*0.5);
+        ctx.lineTo(-hw*2.5, -hh*2);
+        ctx.lineTo(hw*2.5, -hh*2);
+        ctx.lineTo(hw*0.8, -hh*0.5);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.fillStyle = '#333';
+      ctx.beginPath(); ctx.arc(hw*0.2, hh*0.3, 2, 0, Math.PI*2); ctx.fill();
+      break;
+    }
+    case 'shield': {
+      const grad = ctx.createLinearGradient(-hw, -hh, hw, hh);
+      grad.addColorStop(0, '#c8a850');
+      grad.addColorStop(0.5, '#8b6914');
+      grad.addColorStop(1, '#5a4508');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.moveTo(-hw*0.9, -hh*0.9);
+      ctx.lineTo(hw*0.9, -hh*0.9);
+      ctx.quadraticCurveTo(hw, hh*0.2, 0, hh*0.95);
+      ctx.quadraticCurveTo(-hw, hh*0.2, -hw*0.9, -hh*0.9);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = '#3a2a08';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.strokeStyle = '#e8c860';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(-hw*0.75, -hh*0.75);
+      ctx.lineTo(hw*0.75, -hh*0.75);
+      ctx.quadraticCurveTo(hw*0.85, hh*0.1, 0, hh*0.8);
+      ctx.quadraticCurveTo(-hw*0.85, hh*0.1, -hw*0.75, -hh*0.75);
+      ctx.stroke();
+      ctx.fillStyle = '#666';
+      ctx.beginPath(); ctx.arc(0, 0, hw*0.3, 0, Math.PI*2); ctx.fill();
+      ctx.strokeStyle = '#aaa';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      break;
+    }
+    case 'brush': {
+      ctx.fillStyle = '#8B4513';
+      ctx.fillRect(-2, -hh*0.3, 4, hh*0.9);
+      ctx.fillStyle = '#888';
+      ctx.fillRect(-hw*0.7, hh*0.5, hw*1.4, hh*0.15);
+      ctx.fillStyle = b.g.brushColor || '#e91e63';
+      ctx.beginPath();
+      ctx.moveTo(-hw*0.7, hh*0.65);
+      ctx.lineTo(hw*0.7, hh*0.65);
+      ctx.lineTo(hw*0.6, hh*1.0);
+      ctx.lineTo(-hw*0.6, hh*1.0);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+      ctx.lineWidth = 0.5;
+      for (let i=-2;i<=2;i++){
+        ctx.beginPath();
+        ctx.moveTo(i*hw*0.25, hh*0.65);
+        ctx.lineTo(i*hw*0.22, hh*1.0);
+        ctx.stroke();
+      }
+      break;
+    }
+    case 'oilCan': {
+      const grad = ctx.createLinearGradient(-hw, 0, hw, 0);
+      grad.addColorStop(0, '#333');
+      grad.addColorStop(0.5, '#555');
+      grad.addColorStop(1, '#222');
+      ctx.fillStyle = grad;
+      roundRect(ctx, -hw*0.7, -hh*0.4, hw*1.4, hh*1.1, 3);
+      ctx.fill();
+      ctx.strokeStyle = '#111';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.strokeStyle = '#666';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(hw*0.5, 0);
+      ctx.lineTo(hw*1.5, -hh*0.6);
+      ctx.stroke();
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(0, -hh*0.4, hw*0.4, Math.PI, 0);
+      ctx.stroke();
+      ctx.fillStyle = '#aa0';
+      ctx.font = 'bold 6px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('OIL', 0, hh*0.2);
+      break;
+    }
+  }
+
+  ctx.restore();
+}
+
+Events.on(render, 'afterRender', () => {
+  const ctx = render.context;
+
+  for (const p of smoke){
+    ctx.globalAlpha = Math.max(0, p.life/p.maxLife) * 0.55;
+    ctx.fillStyle = p.color;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI*2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  ctx.lineWidth = 1.6;
+  for (const s of sparks){
+    ctx.globalAlpha = Math.max(0, s.life/s.maxLife);
+    ctx.strokeStyle = s.color;
+    ctx.beginPath(); ctx.moveTo(s.x1, s.y1); ctx.lineTo(s.x2, s.y2); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  for (const bm of beams){
+    ctx.strokeStyle = bm.color;
+    ctx.lineWidth = bm.w;
+    ctx.beginPath(); ctx.moveTo(bm.x1, bm.y1); ctx.lineTo(bm.x2, bm.y2); ctx.stroke();
+  }
+
+  ctx.font = 'bold 14px "Segoe UI", sans-serif';
+  ctx.textAlign = 'center';
+  for (const b of bodies){
+    if (b.g && b.g.label){
+      ctx.fillStyle = 'rgba(255,255,255,0.9)';
+      ctx.fillText(b.g.label, b.position.x, b.position.y - 28);
+    }
+  }
+
+  for (const b of bodies){
+    if (!b.g) continue;
+    if (b.g.type === 'cat' || b.g.type === 'zombieCat') drawCat(ctx, b);
+    else if (HIDDEN_TYPES.has(b.g.type)) drawTool(ctx, b);
+  }
+
+  if (dragPoint && draggedBody && !draggedBody.g.dead){
+    ctx.strokeStyle = 'rgba(255,255,120,0.75)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6,4]);
+    ctx.beginPath();
+    ctx.moveTo(dragPoint.position.x, dragPoint.position.y);
+    ctx.lineTo(draggedBody.position.x, draggedBody.position.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(255,255,120,0.95)';
+    ctx.beginPath(); ctx.arc(dragPoint.position.x, dragPoint.position.y, 5, 0, Math.PI*2); ctx.fill();
+  }
+
+  if (flash > 0){
+    ctx.fillStyle = `rgba(255,255,255,${Math.min(1, flash)})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+});
+
+/* =========================================================
+   ИНТЕРФЕЙС
+   ========================================================= */
+const itemsEl = document.getElementById('items');
+const stTool  = document.getElementById('stTool');
+
+CATS.forEach(cat => {
+  const sec = document.createElement('section');
+  const h = document.createElement('h2'); h.textContent = cat.name;
+  sec.appendChild(h);
+  const grid = document.createElement('div'); grid.className = 'grid';
+  ORDER.filter(id => ELEMENTS[id].cat === cat.id).forEach(id => {
+    const el = ELEMENTS[id];
+    const btn = document.createElement('button');
+    btn.className = 'item';
+    btn.dataset.id = id;
+    btn.innerHTML = `<span class="ic">${el.icon}</span><span class="nm">${el.name}</span>`;
+    btn.addEventListener('click', () => selectElement(id));
+    grid.appendChild(btn);
+  });
+  sec.appendChild(grid);
+  itemsEl.appendChild(sec);
+});
+
+function selectElement(id){
+  selected = id;
+  document.querySelectorAll('.item').forEach(b => b.classList.toggle('active', b.dataset.id === id));
+  stTool.textContent = 'Инструмент: ' + ELEMENTS[id].name;
+}
+
+document.getElementById('btnPause').addEventListener('click', function(){
+  paused = !paused;
+  runner.enabled = !paused;
+  this.classList.toggle('active', paused);
+  this.textContent = paused ? '▶ Продолжить' : '⏸ Пауза';
+});
+document.getElementById('btnClear').addEventListener('click', () => {
+  Composite.clear(world, false, true);
+  walls = [];
+  buildWalls();
+  smoke.length = 0; sparks.length = 0; beams.length = 0;
+  deadCats.length = 0;
+  flash = 0;
+  engine.gravity.y = 1;
+  gunReset();
+  releaseDrag();
+});
+
+/* =========================================================
+   ВВОД
+   ========================================================= */
+const mouse = { x: W/2, y: H/2 };
+const mouseDir = { x: 1, y: 0 };
+let lastMouse = { x: W/2, y: H/2 };
+let isDown = false;
+let lastSpawn = 0;
+
+function toWorld(e){
+  const r = canvas.getBoundingClientRect();
+  return {
+    x: (e.clientX - r.left) * (W / r.width),
+    y: (e.clientY - r.top) * (H / r.height)
+  };
+}
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+canvas.addEventListener('pointerdown', e => {
+  const p = toWorld(e);
+  mouse.x = p.x; mouse.y = p.y;
+  if (draggedBody) return;
+  if (e.button === 2){ interact(p); return; }
+  isDown = true;
+  if (selected === 'gravityGun'){ gunClick(p); return; }
+  if (selected === 'eraser'){ eraseAt(p); return; }
+  spawnAt(p);
+  lastSpawn = performance.now();
+});
+canvas.addEventListener('pointermove', e => {
+  const p = toWorld(e);
+  const dx = p.x - lastMouse.x, dy = p.y - lastMouse.y;
+  if (Math.abs(dx) + Math.abs(dy) > 2){ mouseDir.x = dx; mouseDir.y = dy; }
+  lastMouse.x = p.x; lastMouse.y = p.y;
+  mouse.x = p.x; mouse.y = p.y;
+  if (gunPoint) Body.setPosition(gunPoint, p);
+  if (dragPoint) Body.setPosition(dragPoint, p);
+  if (isDown && selected && ELEMENTS[selected] && ELEMENTS[selected].spawn){
+    const now = performance.now();
+    if (now - lastSpawn > 55){ spawnAt(p); lastSpawn = now; }
+  }
+});
+window.addEventListener('pointerup', () => { isDown = false; });
+
+function spawnAt(p){
+  if (!selected) return;
+  const el = ELEMENTS[selected];
+  if (!el || !el.spawn) return;
+  if (Composite.allBodies(world).length > 1400) return;
+  const x = Math.max(30, Math.min(W-30, p.x));
+  const y = Math.max(30, Math.min(H-30, p.y));
+  el.spawn(x, y);
+}
+function interact(p){
+  const found = Query.point(bodies, p);
+  for (const b of found){
+    if (b.g && b.g.onClick){ b.g.onClick(b); return; }
+  }
+}
+function eraseAt(p){
+  const found = Query.point(bodies, p);
+  for (const b of found){ if (!b.isWall) destroyBody(b); }
+}
+
+/* --- Drag & Drop (F + Q/E) --- */
+let draggedBody = null;
+let dragConstraint = null;
+let dragPoint = null;
+
+function tryGrab(p){
+  if (draggedBody) return;
+  const found = Query.point(bodies, p);
+  for (const b of found){
+    if (b.isStatic || !b.g || b.g.dead) continue;
+    draggedBody = b;
+    dragPoint = Bodies.circle(p.x, p.y, 10, {
+      isStatic: true, collisionFilter: { mask: 0 }, render: { visible: false }
+    });
+    Composite.add(world, dragPoint);
+    dragConstraint = Constraint.create({
+      bodyA: dragPoint, bodyB: b, stiffness: 0.15, damping: 0.2, length: 0
+    });
+    Composite.add(world, dragConstraint);
+    break;
+  }
+}
+function releaseDrag(){
+  if (dragConstraint){ Composite.remove(world, dragConstraint); dragConstraint = null; }
+  if (dragPoint){ Composite.remove(world, dragPoint); dragPoint = null; }
+  draggedBody = null;
+}
+window.addEventListener('keydown', e => {
+  if (paused) return;
+  if (e.code === 'KeyF') tryGrab(mouse);
+  if (e.code === 'KeyQ' && draggedBody && !draggedBody.g.dead){
+    Body.setAngle(draggedBody, draggedBody.angle - 0.12);
+    Body.setAngularVelocity(draggedBody, 0);
+  }
+  if (e.code === 'KeyE' && draggedBody && !draggedBody.g.dead){
+    Body.setAngle(draggedBody, draggedBody.angle + 0.12);
+    Body.setAngularVelocity(draggedBody, 0);
+  }
+});
+window.addEventListener('keyup', e => {
+  if (e.code === 'KeyF' && draggedBody) releaseDrag();
+});
+window.addEventListener('blur', () => releaseDrag());
+
+/* --- Гравитационная пушка --- */
+let gunTarget = null, gunConstraint = null, gunPoint = null;
+function gunReset(){
+  if (gunConstraint) Composite.remove(world, gunConstraint);
+  if (gunPoint) Composite.remove(world, gunPoint);
+  gunTarget = null; gunConstraint = null; gunPoint = null;
+}
+function gunClick(p){
+  if (gunConstraint && gunTarget && !gunTarget.g.dead){
+    Composite.remove(world, gunConstraint);
+    const dir = Vector.normalise(Vector.sub(p, gunTarget.position));
+    Body.applyForce(gunTarget, gunTarget.position,
+      { x:dir.x*0.25*gunTarget.mass, y:dir.y*0.25*gunTarget.mass });
+    gunReset(); return;
+  }
+  gunReset();
+  let best = null, bd = 700;
+  for (const b of bodies){
+    if (b.isStatic || !b.g || b.g.dead) continue;
+    const d = dist(b.position, p);
+    if (d < bd){ bd = d; best = b; }
+  }
+  if (!best) return;
+  gunTarget = best;
+  gunPoint = Bodies.circle(p.x, p.y, 10, {
+    isStatic: true, collisionFilter: { mask: 0 }, render: { visible: false }
+  });
+  Composite.add(world, gunPoint);
+  gunConstraint = Constraint.create({
+    bodyA: gunPoint, bodyB: best, stiffness: 0.06, damping: 0.12, length: 0
+  });
+  Composite.add(world, gunConstraint);
+}
+
+/* =========================================================
+   СТАРТОВАЯ СЦЕНА
+   ========================================================= */
+(function initialScene(){
+  ELEMENTS.crate.spawn(300, 300);
+  ELEMENTS.crate.spawn(360, 300);
+  ELEMENTS.crate.spawn(330, 240);
+  ELEMENTS.cat.spawn(700, 400);
+  ELEMENTS.water.spawn(1100, 300);
+  ELEMENTS.water.spawn(1150, 260);
+  ELEMENTS.metal.spawn(1000, 700);
+  ELEMENTS.stone.spawn(500, 700);
+  ELEMENTS.ball.spawn(900, 200);
+  ELEMENTS.ivy.spawn(140, 780);
+  ELEMENTS.stormCloud.spawn(700, 120);
+  ELEMENTS.grail.spawn(200, 200);
+  ELEMENTS.yarnBall.spawn(800, 600);
+  ELEMENTS.axe.spawn(250, 500);
+  ELEMENTS.pickaxe.spawn(450, 500);
+})();
+
+selectElement('stone');
+
+})();
+</script>
+</body>
+</html>
